@@ -1,0 +1,43 @@
+# SolMesh Configuration
+# Copy this file to config.yaml and edit as needed.
+
+# Meshtastic device connection
+mesh:
+  # "serial" for USB or "tcp" for WiFi
+  connection_type: serial
+  # Uncomment for a specific serial device:
+  # device_path: /dev/ttyUSB0
+  # Uncomment for TCP connection:
+  # connection_type: tcp
+  # hostname: 192.168.1.100
+
+# Solana network settings
+solana:
+  # "mainnet-beta", "devnet", or "testnet"
+  network: devnet
+  # Custom RPC URL (overrides network):
+  # rpc_url: https://api.devnet.solana.com
+
+# Gateway mode settings (only needed when running as gateway)
+gateway:
+  # Wallet name for Mode 3 (gateway sends from its hot wallet)
+  # hot_wallet: gateway-wallet
+
+  # Solana public keys allowed to request transfers (Mode 3)
+  # Uses cryptographic identity (Ed25519 pubkey), not spoofable mesh IDs
+  # allowed_requesters:
+  #   - "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+  #   - "DRpbCBMxVnDK7maPMoGQfFiMTO7VCJjUBUZasFHkcQXE"
+
+  # Maximum SOL per Mode 3 transfer request
+  max_transfer_sol: 0.1
+
+  # Rate limiting (per sender)
+  max_requests_per_minute: 10.0
+  rate_limit_burst: 3
+
+  # Gateway beacon broadcast interval (seconds)
+  beacon_interval: 60
+
+# Logging level: DEBUG, INFO, WARNING, ERROR
+log_level: INFO
