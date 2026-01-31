@@ -17,6 +17,7 @@ from solders.pubkey import Pubkey
 from solmesh.chunker import chunk_payload, generate_msg_id
 from solmesh.constants import (
     ACK_TIMEOUT,
+    KNOWN_TOKENS,
     LAMPORTS_PER_SOL,
     MAX_RETRIES,
     MsgType,
@@ -38,6 +39,7 @@ from solmesh.protocol import (
     encode_tx_request,
     pack_message,
 )
+from solmesh.spl import create_spl_transfer
 from solmesh.wallet import WalletManager, create_sol_transfer
 
 logger = logging.getLogger(__name__)
@@ -115,6 +117,46 @@ class ClientNode:
         logger.info(
             "Transaction signed locally (%d bytes): %.4f SOL -> %s",
             len(tx_bytes), amount_sol, recipient,
+        )
+
+        return self.relay_raw_tx(tx_bytes, on_result=on_result)
+
+    def relay_signed_token_tx(self, wallet_name: str, recipient: str,
+                              mint_address: str, amount: float,
+                              decimals: int = 6,
+                              blockhash: Optional[str] = None,
+                              passphrase: str = "",
+                              create_recipient_ata: bool = False,
+                              on_result: Optional[Callable] = None) -> int:
+        """Create, sign, and relay an SPL token transfer over mesh (Mode 1).
+
+        Returns the msg_id for tracking.
+        The private key NEVER leaves this device.
+        """
+        kp = self._wallet_mgr.load_keypair(wallet_name, passphrase=passphrase)
+
+        if blockhash is None:
+            logger.info("Fetching recent blockhash from gateway...")
+            bh_bytes = self.fetch_blockhash()
+            if bh_bytes is None:
+                raise TimeoutError("Failed to fetch blockhash from gateway")
+            recent_blockhash = SolHash.from_bytes(bh_bytes)
+        else:
+            recent_blockhash = SolHash.from_string(blockhash)
+
+        recipient_pubkey = Pubkey.from_string(recipient)
+        mint_pubkey = Pubkey.from_string(mint_address)
+        base_units = int(amount * (10 ** decimals))
+
+        tx_bytes = create_spl_transfer(
+            kp, recipient_pubkey, mint_pubkey,
+            base_units, decimals, recent_blockhash,
+            create_recipient_ata=create_recipient_ata,
+        )
+        token_symbol = KNOWN_TOKENS.get(mint_address, ("TOKEN",))[0]
+        logger.info(
+            "Token transfer signed locally (%d bytes): %s %s -> %s",
+            len(tx_bytes), amount, token_symbol, recipient,
         )
 
         return self.relay_raw_tx(tx_bytes, on_result=on_result)
@@ -245,6 +287,48 @@ class ClientNode:
         self._mesh.send(msg, destination_id=self._gateway_id)
         return msg_id
 
+    def request_token_transfer(self, wallet_name: str, destination: str,
+                               mint_address: str, amount: float,
+                               decimals: int = 6,
+                               passphrase: str = "") -> int:
+        """Send a signed TX_REQUEST for an SPL token transfer to the gateway.
+
+        Returns msg_id for tracking.
+        """
+        if not self._gateway_id:
+            raise ValueError("Gateway node ID not set")
+
+        kp = self._wallet_mgr.load_keypair(wallet_name, passphrase=passphrase)
+        sender_pubkey_bytes = bytes(kp.pubkey())
+        dest_pubkey = Pubkey.from_string(destination)
+        dest_pubkey_bytes = bytes(dest_pubkey)
+        mint_pubkey = Pubkey.from_string(mint_address)
+        mint_bytes = bytes(mint_pubkey)
+        base_units = int(amount * (10 ** decimals))
+
+        # Sign: sender + dest + amount(8) + flags(1) + mint(32)
+        flags = 0x01  # has_mint
+        signed_data = (sender_pubkey_bytes + dest_pubkey_bytes
+                       + struct.pack("!Q", base_units)
+                       + struct.pack("!B", flags)
+                       + mint_bytes)
+        sig = sign_payload(kp, signed_data)
+
+        payload = encode_tx_request(
+            sender_pubkey_bytes, dest_pubkey_bytes, base_units, sig,
+            mint=mint_bytes,
+        )
+        msg_id = generate_msg_id()
+        msg = pack_message(MsgType.TX_REQUEST, msg_id, 0, 1, payload)
+
+        token_symbol = KNOWN_TOKENS.get(mint_address, ("TOKEN",))[0]
+        logger.info(
+            "Requesting gateway token transfer: %s %s -> %s",
+            amount, token_symbol, destination,
+        )
+        self._mesh.send(msg, destination_id=self._gateway_id)
+        return msg_id
+
     def fetch_blockhash(self, timeout: float = 60) -> Optional[bytes]:
         """Request a recent blockhash from the gateway.
 
@@ -286,6 +370,24 @@ class ClientNode:
 
         self._mesh.send(msg, destination_id=self._gateway_id)
         logger.info("Requested balance for %s", address)
+        return msg_id
+
+    def check_token_balance(self, address: str, mint_address: str) -> int:
+        """Request token balance of a Solana address from the gateway.
+
+        Returns msg_id. Listen for the result via wait_for_balance.
+        """
+        if not self._gateway_id:
+            raise ValueError("Gateway node ID not set")
+
+        pubkey = Pubkey.from_string(address)
+        mint_pubkey = Pubkey.from_string(mint_address)
+        payload = encode_balance_req(bytes(pubkey), mint=bytes(mint_pubkey))
+        msg_id = generate_msg_id()
+        msg = pack_message(MsgType.BALANCE_REQ, msg_id, 0, 1, payload)
+
+        self._mesh.send(msg, destination_id=self._gateway_id)
+        logger.info("Requested token balance for %s", address)
         return msg_id
 
     def wait_for_result(self, msg_id: int, timeout: float = 120) -> Optional[dict]:
@@ -363,15 +465,37 @@ class ClientNode:
         """Process balance response from gateway."""
         resp = decode_balance_resp(payload)
         pubkey = Pubkey.from_bytes(resp["pubkey"])
-        sol = resp["lamports"] / LAMPORTS_PER_SOL
-        logger.info("Balance for %s: %.9f SOL", pubkey, sol)
-        with self._balance_cond:
-            self._balances[header.msg_id] = {
-                "pubkey": str(pubkey),
-                "lamports": resp["lamports"],
-                "sol": sol,
-            }
-            self._balance_cond.notify_all()
+        mint_bytes = resp.get("mint", b"")
+
+        if mint_bytes:
+            mint_pubkey = Pubkey.from_bytes(mint_bytes)
+            mint_str = str(mint_pubkey)
+            token_info = KNOWN_TOKENS.get(mint_str, ("TOKEN", 6))
+            symbol, decimals = token_info
+            human_amount = resp["amount"] / (10 ** decimals)
+            logger.info("Token balance for %s: %s %s", pubkey, human_amount, symbol)
+            with self._balance_cond:
+                self._balances[header.msg_id] = {
+                    "pubkey": str(pubkey),
+                    "amount": resp["amount"],
+                    "human_amount": human_amount,
+                    "mint": mint_str,
+                    "token_symbol": symbol,
+                    "decimals": decimals,
+                    "lamports": resp["amount"],
+                    "sol": resp["amount"] / LAMPORTS_PER_SOL,
+                }
+                self._balance_cond.notify_all()
+        else:
+            sol = resp["lamports"] / LAMPORTS_PER_SOL
+            logger.info("Balance for %s: %.9f SOL", pubkey, sol)
+            with self._balance_cond:
+                self._balances[header.msg_id] = {
+                    "pubkey": str(pubkey),
+                    "lamports": resp["lamports"],
+                    "sol": sol,
+                }
+                self._balance_cond.notify_all()
 
     def _handle_blockhash_resp(self, header: SolMeshHeader, payload: bytes,
                                sender_id: str) -> None:

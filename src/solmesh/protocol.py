@@ -122,11 +122,15 @@ def unpack_message(raw: bytes) -> tuple[SolMeshHeader, bytes]:
 
 
 def encode_tx_request(sender_pubkey: bytes, dest_pubkey: bytes,
-                      lamports: int, signature: bytes,
-                      memo: str = "") -> bytes:
+                      amount: int, signature: bytes,
+                      memo: str = "", mint: bytes = b"") -> bytes:
     """Encode TX_REQUEST payload.
 
-    Layout: signature(64) + sender_pubkey(32) + dest_pubkey(32) + lamports(8) + memo
+    Layout: signature(64) + sender_pubkey(32) + dest_pubkey(32) + amount(8)
+            + flags(1) + [mint(32)] + memo
+
+    The amount field represents lamports for SOL transfers, or base units
+    for SPL token transfers (e.g., 1 USDC = 1_000_000).
     """
     if len(signature) != 64:
         raise ValueError("Signature must be 64 bytes")
@@ -134,11 +138,19 @@ def encode_tx_request(sender_pubkey: bytes, dest_pubkey: bytes,
         raise ValueError("Sender pubkey must be 32 bytes")
     if len(dest_pubkey) != 32:
         raise ValueError("Destination pubkey must be 32 bytes")
+    if mint and len(mint) != 32:
+        raise ValueError("Mint must be 32 bytes")
 
-    payload = signature + sender_pubkey + dest_pubkey + struct.pack("!Q", lamports)
+    flags = 0x00
+    if mint:
+        flags |= 0x01
+
+    payload = signature + sender_pubkey + dest_pubkey + struct.pack("!Q", amount)
+    payload += struct.pack("!B", flags)
+    if mint:
+        payload += mint
     if memo:
-        memo_bytes = memo.encode("utf-8")
-        payload += memo_bytes
+        payload += memo.encode("utf-8")
     return payload
 
 
@@ -150,14 +162,34 @@ def decode_tx_request(payload: bytes) -> dict:
     signature = payload[0:64]
     sender_pubkey = payload[64:96]
     dest_pubkey = payload[96:128]
-    lamports = struct.unpack("!Q", payload[128:136])[0]
-    memo = payload[136:].decode("utf-8") if len(payload) > 136 else ""
+    amount = struct.unpack("!Q", payload[128:136])[0]
+
+    # Parse flags and optional mint
+    flags = 0x00
+    mint = b""
+    memo_offset = 136
+
+    if len(payload) > 136:
+        flags = payload[136]
+        memo_offset = 137
+        if flags & 0x01:  # has_mint
+            if len(payload) < 169:
+                raise ValueError(
+                    f"TX_REQUEST has mint flag but too short: {len(payload)} < 169"
+                )
+            mint = payload[137:169]
+            memo_offset = 169
+
+    memo = payload[memo_offset:].decode("utf-8") if len(payload) > memo_offset else ""
 
     return {
         "signature": signature,
         "sender_pubkey": sender_pubkey,
         "dest_pubkey": dest_pubkey,
-        "lamports": lamports,
+        "amount": amount,
+        "lamports": amount,  # backwards compat alias
+        "flags": flags,
+        "mint": mint,
         "memo": memo,
     }
 
@@ -221,25 +253,38 @@ def decode_nack(payload: bytes) -> dict:
     }
 
 
-def encode_balance_req(pubkey: bytes) -> bytes:
-    """Encode BALANCE_REQ payload: 32-byte pubkey."""
+def encode_balance_req(pubkey: bytes, mint: bytes = b"") -> bytes:
+    """Encode BALANCE_REQ payload: 32-byte pubkey + optional 32-byte mint."""
     if len(pubkey) != 32:
         raise ValueError("Pubkey must be 32 bytes")
-    return pubkey
+    if mint and len(mint) != 32:
+        raise ValueError("Mint must be 32 bytes")
+    payload = pubkey
+    if mint:
+        payload += mint
+    return payload
 
 
 def decode_balance_req(payload: bytes) -> dict:
     """Decode BALANCE_REQ payload."""
     if len(payload) < 32:
         raise ValueError(f"BALANCE_REQ too short: {len(payload)} < 32")
-    return {"pubkey": payload[0:32]}
+    result = {"pubkey": payload[0:32], "mint": b""}
+    if len(payload) >= 64:
+        result["mint"] = payload[32:64]
+    return result
 
 
-def encode_balance_resp(pubkey: bytes, lamports: int) -> bytes:
-    """Encode BALANCE_RESP: pubkey(32) + lamports(8)."""
+def encode_balance_resp(pubkey: bytes, amount: int, mint: bytes = b"") -> bytes:
+    """Encode BALANCE_RESP: pubkey(32) + amount(8) + [mint(32)]."""
     if len(pubkey) != 32:
         raise ValueError("Pubkey must be 32 bytes")
-    return pubkey + struct.pack("!Q", lamports)
+    if mint and len(mint) != 32:
+        raise ValueError("Mint must be 32 bytes")
+    payload = pubkey + struct.pack("!Q", amount)
+    if mint:
+        payload += mint
+    return payload
 
 
 def decode_balance_resp(payload: bytes) -> dict:
@@ -247,8 +292,14 @@ def decode_balance_resp(payload: bytes) -> dict:
     if len(payload) < 40:
         raise ValueError(f"BALANCE_RESP too short: {len(payload)} < 40")
     pubkey = payload[0:32]
-    lamports = struct.unpack("!Q", payload[32:40])[0]
-    return {"pubkey": pubkey, "lamports": lamports}
+    amount = struct.unpack("!Q", payload[32:40])[0]
+    mint = payload[40:72] if len(payload) >= 72 else b""
+    return {
+        "pubkey": pubkey,
+        "lamports": amount,  # backwards compat alias
+        "amount": amount,
+        "mint": mint,
+    }
 
 
 def encode_blockhash_req() -> bytes:
@@ -280,6 +331,7 @@ BEACON_CAP_RELAY = 0x01      # Can relay signed transactions (Mode 1)
 BEACON_CAP_HOT_WALLET = 0x02 # Has hot wallet for transfers (Mode 3)
 BEACON_CAP_BALANCE = 0x04    # Can query balances
 BEACON_CAP_BLOCKHASH = 0x08  # Can provide recent blockhash
+BEACON_CAP_SPL_TOKEN = 0x10  # Can handle SPL token transfers
 
 
 def encode_gateway_beacon(version: int, capabilities: int,

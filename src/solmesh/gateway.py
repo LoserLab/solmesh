@@ -7,6 +7,7 @@ Supports all three operating modes.
 
 from __future__ import annotations
 import logging
+import struct
 import threading
 import time
 from typing import Optional
@@ -18,6 +19,7 @@ from solders.pubkey import Pubkey
 from solmesh.chunker import ChunkReassembler, chunk_payload, generate_msg_id
 from solmesh.config import GatewayConfig
 from solmesh.constants import (
+    KNOWN_TOKENS,
     LAMPORTS_PER_SOL,
     PROTOCOL_VERSION,
     MsgType,
@@ -31,6 +33,7 @@ from solmesh.protocol import (
     BEACON_CAP_BLOCKHASH,
     BEACON_CAP_HOT_WALLET,
     BEACON_CAP_RELAY,
+    BEACON_CAP_SPL_TOKEN,
     SolMeshHeader,
     decode_balance_req,
     decode_blockhash_req,
@@ -44,6 +47,7 @@ from solmesh.protocol import (
     encode_tx_result,
     pack_message,
 )
+from solmesh.spl import create_spl_transfer, find_associated_token_address
 from solmesh.wallet import WalletManager, create_sol_transfer, deserialize_transaction
 
 logger = logging.getLogger(__name__)
@@ -119,7 +123,7 @@ class GatewayNode:
 
     def _send_beacon(self) -> None:
         """Broadcast a gateway beacon message."""
-        caps = BEACON_CAP_RELAY | BEACON_CAP_BALANCE | BEACON_CAP_BLOCKHASH
+        caps = BEACON_CAP_RELAY | BEACON_CAP_BALANCE | BEACON_CAP_BLOCKHASH | BEACON_CAP_SPL_TOKEN
         hot_wallet_pubkey = b""
         if self._hot_keypair:
             caps |= BEACON_CAP_HOT_WALLET
@@ -218,7 +222,13 @@ class GatewayNode:
 
         # Verify Ed25519 signature FIRST to prove keypair ownership
         sender_pubkey = Pubkey.from_bytes(req["sender_pubkey"])
-        signed_data = req["sender_pubkey"] + req["dest_pubkey"] + payload[128:136]
+        # Build signed data: sender + dest + amount(8) + [flags(1) + mint(32)]
+        signed_data = (req["sender_pubkey"] + req["dest_pubkey"]
+                       + struct.pack("!Q", req["amount"]))
+        if req.get("flags", 0):
+            signed_data += struct.pack("!B", req["flags"])
+            if req["flags"] & 0x01 and req.get("mint"):
+                signed_data += req["mint"]
         if not verify_payload(sender_pubkey, signed_data, req["signature"]):
             logger.warning("Invalid signature on TX_REQUEST from %s", sender_id)
             self._send_nack(
@@ -241,18 +251,39 @@ class GatewayNode:
                 )
                 return
 
+        # Detect token transfer
+        mint_bytes = req.get("mint", b"")
+        is_token_transfer = len(mint_bytes) == 32
+
         # Check amount limit
-        max_lamports = int(self._config.max_transfer_sol * LAMPORTS_PER_SOL)
-        if req["lamports"] > max_lamports:
-            logger.warning(
-                "TX_REQUEST amount %d exceeds limit %d",
-                req["lamports"], max_lamports,
-            )
-            self._send_nack(
-                header.msg_id, ErrorCode.AMOUNT_EXCEEDED,
-                f"Max {self._config.max_transfer_sol} SOL", sender_id,
-            )
-            return
+        if is_token_transfer:
+            mint_pubkey = Pubkey.from_bytes(mint_bytes)
+            mint_str = str(mint_pubkey)
+            token_info = KNOWN_TOKENS.get(mint_str)
+            if token_info is None:
+                self._send_nack(
+                    header.msg_id, ErrorCode.UNSUPPORTED_TOKEN,
+                    f"Unsupported token: {mint_str[:16]}...", sender_id,
+                )
+                return
+            symbol, decimals = token_info
+            max_amount = self._config.get_max_transfer_token(mint_str)
+            if max_amount is not None:
+                max_base_units = int(max_amount * (10 ** decimals))
+                if req["amount"] > max_base_units:
+                    self._send_nack(
+                        header.msg_id, ErrorCode.AMOUNT_EXCEEDED,
+                        f"Max {max_amount} {symbol}", sender_id,
+                    )
+                    return
+        else:
+            max_lamports = int(self._config.max_transfer_sol * LAMPORTS_PER_SOL)
+            if req["lamports"] > max_lamports:
+                self._send_nack(
+                    header.msg_id, ErrorCode.AMOUNT_EXCEEDED,
+                    f"Max {self._config.max_transfer_sol} SOL", sender_id,
+                )
+                return
 
         # Fetch recent blockhash
         try:
@@ -269,10 +300,28 @@ class GatewayNode:
         # Create and sign transfer
         dest_pubkey = Pubkey.from_bytes(req["dest_pubkey"])
         try:
-            tx_bytes = create_sol_transfer(
-                self._hot_keypair, dest_pubkey,
-                req["lamports"], recent_blockhash,
-            )
+            if is_token_transfer:
+                mint_pubkey = Pubkey.from_bytes(mint_bytes)
+                _, decimals = KNOWN_TOKENS[str(mint_pubkey)]
+                # Check if recipient has an ATA; create if missing
+                recipient_ata = find_associated_token_address(dest_pubkey, mint_pubkey)
+                create_ata = False
+                try:
+                    ata_info = self._rpc.get_account_info(recipient_ata)
+                    if ata_info.value is None:
+                        create_ata = True
+                except Exception:
+                    create_ata = True
+                tx_bytes = create_spl_transfer(
+                    self._hot_keypair, dest_pubkey, mint_pubkey,
+                    req["amount"], decimals, recent_blockhash,
+                    create_recipient_ata=create_ata,
+                )
+            else:
+                tx_bytes = create_sol_transfer(
+                    self._hot_keypair, dest_pubkey,
+                    req["lamports"], recent_blockhash,
+                )
         except Exception as e:
             logger.error("Failed to create transaction: %s", e)
             self._send_nack(
@@ -300,14 +349,23 @@ class GatewayNode:
             return
 
         pubkey = Pubkey.from_bytes(req["pubkey"])
+        mint_bytes = req.get("mint", b"")
+
         try:
-            resp = self._rpc.get_balance(pubkey)
-            lamports = resp.value
+            if mint_bytes:
+                mint_pubkey = Pubkey.from_bytes(mint_bytes)
+                ata = find_associated_token_address(pubkey, mint_pubkey)
+                resp = self._rpc.get_token_account_balance(ata)
+                amount = int(resp.value.amount)
+            else:
+                resp = self._rpc.get_balance(pubkey)
+                amount = resp.value
+                mint_bytes = b""
         except Exception as e:
             logger.error("Balance query failed: %s", e)
-            lamports = 0
+            amount = 0
 
-        resp_payload = encode_balance_resp(req["pubkey"], lamports)
+        resp_payload = encode_balance_resp(req["pubkey"], amount, mint=mint_bytes)
         resp_msg = pack_message(
             MsgType.BALANCE_RESP, generate_msg_id(), 0, 1, resp_payload
         )

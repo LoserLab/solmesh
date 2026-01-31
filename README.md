@@ -2,7 +2,7 @@
 
 Send Solana transactions over Meshtastic/LoRa mesh networks.
 
-SolMesh enables cryptocurrency transfers in off-grid environments using LoRa radio. Transactions are signed locally (private keys never leave your device), chunked to fit within LoRa's bandwidth constraints, and relayed through a gateway node to the Solana network.
+SolMesh enables cryptocurrency transfers in off-grid environments using LoRa radio. Supports native SOL and SPL tokens (USDC). Transactions are signed locally (private keys never leave your device), chunked to fit within LoRa's bandwidth constraints, and relayed through a gateway node to the Solana network.
 
 ## Operating Modes
 
@@ -13,7 +13,7 @@ Sign a Solana transaction on your local device, send the signed transaction over
 Exchange Solana addresses with other mesh nodes over LoRa. Address sharing includes ACK-based delivery confirmation with automatic retry.
 
 ### Mode 3: Full Gateway
-A gateway node holds a hot wallet. Remote offline nodes send authenticated transfer requests, and the gateway signs and broadcasts on their behalf. Requests are authorized by Ed25519 signature verification against a Solana pubkey allowlist.
+A gateway node holds a hot wallet. Remote offline nodes send authenticated transfer requests (SOL or SPL tokens), and the gateway signs and broadcasts on their behalf. Requests are authorized by Ed25519 signature verification against a Solana pubkey allowlist.
 
 ## Installation
 
@@ -92,7 +92,35 @@ solmesh send request \
   --gateway-node '!aabbccdd'
 ```
 
-### 5. Check balance
+### 5. Send USDC or SPL tokens
+
+All send commands accept a `--token` flag. Use `USDC` as a shorthand or pass any SPL token mint address directly.
+
+**Mode 1** - Sign a USDC transfer locally and relay:
+```bash
+solmesh send relay \
+  --wallet mywallet \
+  --to <RECIPIENT_ADDRESS> \
+  --amount 5.0 \
+  --token USDC \
+  --gateway-node '!aabbccdd'
+```
+
+If the recipient doesn't have an associated token account yet, add `--create-ata` to have the transaction create one.
+
+**Mode 3** - Request USDC transfer from the gateway hot wallet:
+```bash
+solmesh send request \
+  --wallet mywallet \
+  --to <RECIPIENT_ADDRESS> \
+  --amount 5.0 \
+  --token USDC \
+  --gateway-node '!aabbccdd'
+```
+
+SOL commands are unchanged -- omit `--token` to send SOL.
+
+### 6. Check balance
 
 ```bash
 solmesh balance --address <SOLANA_ADDRESS> --gateway-node '!aabbccdd'
@@ -104,7 +132,13 @@ Or with auto-discovery:
 solmesh balance --address <SOLANA_ADDRESS> --auto-discover
 ```
 
-### 6. Share your address
+Check a token balance:
+
+```bash
+solmesh balance --address <SOLANA_ADDRESS> --token USDC --gateway-node '!aabbccdd'
+```
+
+### 7. Share your address
 
 ```bash
 solmesh share-address --wallet mywallet --label "Field Node Alpha"
@@ -122,6 +156,18 @@ Then run with:
 
 ```bash
 solmesh -c config.yaml gateway
+```
+
+### Transfer Limits
+
+SOL and token transfer limits are configured separately:
+
+```yaml
+max_transfer_sol: 0.1
+max_transfer_usdc: 10.0
+# Per-mint limits for other SPL tokens:
+# token_limits:
+#   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 10.0
 ```
 
 ### Rate Limiting
@@ -160,6 +206,7 @@ SolMesh uses a compact binary protocol designed for LoRa's ~237-byte message lim
 - **10-byte header**: magic (2B) + version (1B) + message type (1B) + message ID (2B) + chunk number (1B) + total chunks (1B) + payload length (1B) + CRC-8 (1B)
 - **Up to 210 bytes payload per chunk**
 - A typical SOL transfer (~215 bytes) fits in 2 chunks
+- SPL token payloads include a flags byte and optional 32-byte mint address, backwards-compatible with SOL-only messages
 
 Message types: `TX_CHUNK`, `TX_REQUEST`, `ADDR_SHARE`, `ACK`, `NACK`, `BALANCE_REQ`, `BALANCE_RESP`, `BLOCKHASH_REQ`, `BLOCKHASH_RESP`, `TX_RESULT`, `GATEWAY_BEACON`
 
@@ -170,7 +217,7 @@ Message types: `TX_CHUNK`, `TX_REQUEST`, `ADDR_SHARE`, `ACK`, `NACK`, `BALANCE_R
 - Wallet files are created with `0600` permissions (owner read/write only)
 - BIP39 mnemonic backup -- 24-word recovery phrase displayed once, never stored
 - Mode 3 requests are authenticated via Ed25519 signatures verified against the sender's Solana pubkey (not the spoofable mesh node ID)
-- Gateway enforces an allowlist of authorized Solana pubkeys and per-transfer SOL limits
+- Gateway enforces an allowlist of authorized Solana pubkeys and per-transfer limits (separate SOL and per-token limits)
 - Per-sender token bucket rate limiting protects the gateway from abuse
 - CRC-8 integrity check on all protocol messages (on top of LoRa's FEC)
 - Chunk reassembly is keyed by `(sender_id, msg_id)` to prevent cross-sender collisions

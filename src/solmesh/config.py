@@ -8,7 +8,13 @@ from typing import Optional
 
 import yaml
 
-from solmesh.constants import DEFAULT_RPC_URL, DEVNET_RPC_URL, TESTNET_RPC_URL
+from solmesh.constants import (
+    DEFAULT_RPC_URL,
+    DEVNET_RPC_URL,
+    TESTNET_RPC_URL,
+    USDC_MINT_MAINNET,
+    USDC_MINT_DEVNET,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +43,22 @@ class GatewayConfig:
     hot_wallet: Optional[str] = None
     allowed_requesters: list[str] = field(default_factory=list)
     max_transfer_sol: float = 0.1
+    max_transfer_usdc: float = 10.0
+    token_limits: dict[str, float] = field(default_factory=dict)
     max_requests_per_minute: float = 10.0
     rate_limit_burst: int = 3
     beacon_interval: int = 60
+
+    def get_max_transfer_token(self, mint_address: str) -> Optional[float]:
+        """Get the max transfer amount for a token by its mint address.
+
+        Returns None if the token has no configured limit.
+        """
+        if mint_address in self.token_limits:
+            return self.token_limits[mint_address]
+        if mint_address in (USDC_MINT_MAINNET, USDC_MINT_DEVNET):
+            return self.max_transfer_usdc
+        return None
 
 
 @dataclass
@@ -78,6 +97,8 @@ def load_config(path: Path) -> SolMeshConfig:
             hot_wallet=g.get("hot_wallet"),
             allowed_requesters=g.get("allowed_requesters", []),
             max_transfer_sol=g.get("max_transfer_sol", 0.1),
+            max_transfer_usdc=g.get("max_transfer_usdc", 10.0),
+            token_limits=g.get("token_limits", {}),
             max_requests_per_minute=g.get("max_requests_per_minute", 10.0),
             rate_limit_burst=g.get("rate_limit_burst", 3),
             beacon_interval=g.get("beacon_interval", 60),

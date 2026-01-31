@@ -29,6 +29,33 @@ def build_mesh(config: SolMeshConfig) -> MeshInterface:
     )
 
 
+def _resolve_token(token_str: str, network: str = "devnet") -> tuple[str, int, str]:
+    """Resolve a token identifier to (mint_address, decimals, symbol).
+
+    Accepts 'USDC' (case-insensitive) or a full base58 mint address.
+    """
+    from solmesh.constants import (
+        USDC_MINT_MAINNET, USDC_MINT_DEVNET,
+        KNOWN_TOKENS, USDC_DECIMALS,
+    )
+
+    upper = token_str.upper()
+    if upper == "USDC":
+        if network == "mainnet-beta":
+            return USDC_MINT_MAINNET, USDC_DECIMALS, "USDC"
+        else:
+            return USDC_MINT_DEVNET, USDC_DECIMALS, "USDC"
+
+    # Assume it's a raw mint address
+    info = KNOWN_TOKENS.get(token_str)
+    if info:
+        symbol, decimals = info
+        return token_str, decimals, symbol
+
+    # Unknown token -- default to 6 decimals
+    return token_str, 6, f"TOKEN({token_str[:8]}...)"
+
+
 @click.group()
 @click.option("--config", "-c", "config_path", type=click.Path(exists=True),
               default=None, help="Path to config YAML file")
@@ -93,7 +120,7 @@ def gateway(ctx, rpc_url, hot_wallet, passphrase, beacon_interval):
     click.echo(f"  Network:    {config.solana.network}")
     if config.gateway.hot_wallet:
         click.echo(f"  Hot wallet: {config.gateway.hot_wallet}")
-        click.echo(f"  Max transfer: {config.gateway.max_transfer_sol} SOL")
+        click.echo(f"  Max transfer: {config.gateway.max_transfer_sol} SOL / {config.gateway.max_transfer_usdc} USDC")
     click.echo()
 
     gw.start(hot_wallet_passphrase=passphrase)
@@ -111,14 +138,17 @@ def send(ctx):
 @send.command("relay")
 @click.option("--wallet", "-w", required=True, help="Local wallet name")
 @click.option("--to", "recipient", required=True, help="Recipient Solana address")
-@click.option("--amount", "-a", required=True, type=float, help="Amount in SOL")
+@click.option("--amount", "-a", required=True, type=float, help="Amount (SOL or token units)")
+@click.option("--token", default=None, help="Token to send: 'USDC' or a mint address (default: SOL)")
+@click.option("--create-ata", is_flag=True, help="Create recipient token account if needed")
 @click.option("--blockhash", default=None, help="Recent blockhash (base58). Auto-fetched from gateway if omitted.")
 @click.option("--gateway-node", "-g", help="Gateway mesh node ID (e.g., !aabbccdd)")
 @click.option("--auto-discover", is_flag=True, help="Auto-discover gateway via beacon")
 @click.option("--passphrase", prompt=True, hide_input=True, default="",
               help="Wallet passphrase")
 @click.pass_context
-def send_relay(ctx, wallet, recipient, amount, blockhash, gateway_node, auto_discover, passphrase):
+def send_relay(ctx, wallet, recipient, amount, token, create_ata, blockhash,
+               gateway_node, auto_discover, passphrase):
     """Mode 1: Sign locally and relay signed TX over mesh to gateway."""
     from solmesh.client import ClientNode
 
@@ -138,22 +168,47 @@ def send_relay(ctx, wallet, recipient, amount, blockhash, gateway_node, auto_dis
             sys.exit(1)
         click.echo(f"  Found gateway: {gw}")
 
-    click.echo(f"Signing transaction locally...")
-    click.echo(f"  From:   {wallet}")
-    click.echo(f"  To:     {recipient}")
-    click.echo(f"  Amount: {amount} SOL")
-    if not blockhash:
-        click.echo(f"  Blockhash: auto-fetching from gateway...")
-    click.echo()
-
     try:
-        msg_id = client.relay_signed_tx(
-            wallet_name=wallet,
-            recipient=recipient,
-            amount_sol=amount,
-            blockhash=blockhash,
-            passphrase=passphrase,
-        )
+        if token:
+            mint_address, decimals, symbol = _resolve_token(token, config.solana.network)
+            click.echo(f"Signing token transaction locally...")
+            click.echo(f"  From:   {wallet}")
+            click.echo(f"  To:     {recipient}")
+            click.echo(f"  Amount: {amount} {symbol}")
+            click.echo(f"  Token:  {mint_address}")
+            if create_ata:
+                click.echo(f"  Creating recipient token account if needed")
+            if not blockhash:
+                click.echo(f"  Blockhash: auto-fetching from gateway...")
+            click.echo()
+
+            msg_id = client.relay_signed_token_tx(
+                wallet_name=wallet,
+                recipient=recipient,
+                mint_address=mint_address,
+                amount=amount,
+                decimals=decimals,
+                blockhash=blockhash,
+                passphrase=passphrase,
+                create_recipient_ata=create_ata,
+            )
+        else:
+            click.echo(f"Signing transaction locally...")
+            click.echo(f"  From:   {wallet}")
+            click.echo(f"  To:     {recipient}")
+            click.echo(f"  Amount: {amount} SOL")
+            if not blockhash:
+                click.echo(f"  Blockhash: auto-fetching from gateway...")
+            click.echo()
+
+            msg_id = client.relay_signed_tx(
+                wallet_name=wallet,
+                recipient=recipient,
+                amount_sol=amount,
+                blockhash=blockhash,
+                passphrase=passphrase,
+            )
+
         click.echo(f"Transaction sent (msg_id={msg_id}). Waiting for result...")
 
         result = client.wait_for_result(msg_id)
@@ -170,14 +225,15 @@ def send_relay(ctx, wallet, recipient, amount, blockhash, gateway_node, auto_dis
 @send.command("request")
 @click.option("--wallet", "-w", required=True, help="Your wallet name (for auth)")
 @click.option("--to", "recipient", required=True, help="Recipient Solana address")
-@click.option("--amount", "-a", required=True, type=float, help="Amount in SOL")
+@click.option("--amount", "-a", required=True, type=float, help="Amount (SOL or token units)")
+@click.option("--token", default=None, help="Token to send: 'USDC' or a mint address (default: SOL)")
 @click.option("--gateway-node", "-g", default=None, help="Gateway mesh node ID")
 @click.option("--auto-discover", is_flag=True, help="Auto-discover gateway via beacon")
 @click.option("--passphrase", prompt=True, hide_input=True, default="",
               help="Wallet passphrase")
 @click.pass_context
-def send_request(ctx, wallet, recipient, amount, gateway_node, auto_discover, passphrase):
-    """Mode 3: Request gateway to send SOL from its hot wallet."""
+def send_request(ctx, wallet, recipient, amount, token, gateway_node, auto_discover, passphrase):
+    """Mode 3: Request gateway to send from its hot wallet."""
     from solmesh.client import ClientNode
 
     config = ctx.obj["config"]
@@ -196,18 +252,36 @@ def send_request(ctx, wallet, recipient, amount, gateway_node, auto_discover, pa
             sys.exit(1)
         click.echo(f"  Found gateway: {gw}")
 
-    click.echo(f"Requesting gateway transfer...")
-    click.echo(f"  To:     {recipient}")
-    click.echo(f"  Amount: {amount} SOL")
-    click.echo()
-
     try:
-        msg_id = client.request_transfer(
-            wallet_name=wallet,
-            destination=recipient,
-            amount_sol=amount,
-            passphrase=passphrase,
-        )
+        if token:
+            mint_address, decimals, symbol = _resolve_token(token, config.solana.network)
+            click.echo(f"Requesting gateway token transfer...")
+            click.echo(f"  To:     {recipient}")
+            click.echo(f"  Amount: {amount} {symbol}")
+            click.echo(f"  Token:  {mint_address}")
+            click.echo()
+
+            msg_id = client.request_token_transfer(
+                wallet_name=wallet,
+                destination=recipient,
+                mint_address=mint_address,
+                amount=amount,
+                decimals=decimals,
+                passphrase=passphrase,
+            )
+        else:
+            click.echo(f"Requesting gateway transfer...")
+            click.echo(f"  To:     {recipient}")
+            click.echo(f"  Amount: {amount} SOL")
+            click.echo()
+
+            msg_id = client.request_transfer(
+                wallet_name=wallet,
+                destination=recipient,
+                amount_sol=amount,
+                passphrase=passphrase,
+            )
+
         click.echo(f"Request sent (msg_id={msg_id}). Waiting for result...")
 
         result = client.wait_for_result(msg_id)
@@ -250,11 +324,12 @@ def share_address(ctx, wallet, label):
 
 @cli.command("balance")
 @click.option("--address", "-a", required=True, help="Solana address to check")
+@click.option("--token", default=None, help="Token: 'USDC' or mint address (default: SOL)")
 @click.option("--gateway-node", "-g", default=None, help="Gateway mesh node ID")
 @click.option("--auto-discover", is_flag=True, help="Auto-discover gateway via beacon")
 @click.pass_context
-def check_balance(ctx, address, gateway_node, auto_discover):
-    """Query SOL balance via gateway."""
+def check_balance(ctx, address, token, gateway_node, auto_discover):
+    """Query balance via gateway (SOL or token)."""
     from solmesh.client import ClientNode
 
     config = ctx.obj["config"]
@@ -274,15 +349,28 @@ def check_balance(ctx, address, gateway_node, auto_discover):
         click.echo(f"  Found gateway: {gw}")
 
     try:
-        client.check_balance(address)
-        click.echo(f"Balance request sent. Waiting for response...")
+        if token:
+            mint_address, decimals, symbol = _resolve_token(token, config.solana.network)
+            client.check_token_balance(address, mint_address)
+            click.echo(f"Token balance request sent ({symbol}). Waiting for response...")
 
-        result = client.wait_for_balance(timeout=60)
-        if result:
-            click.echo(f"Address: {result['pubkey']}")
-            click.echo(f"Balance: {result['sol']:.9f} SOL ({result['lamports']} lamports)")
+            result = client.wait_for_balance(timeout=60)
+            if result:
+                human = result.get("human_amount", result.get("amount", 0) / (10 ** decimals))
+                click.echo(f"Address: {result['pubkey']}")
+                click.echo(f"Balance: {human:.{decimals}f} {symbol} ({result.get('amount', 0)} base units)")
+            else:
+                click.echo("Timed out waiting for balance response.")
         else:
-            click.echo("Timed out waiting for balance response.")
+            client.check_balance(address)
+            click.echo(f"Balance request sent. Waiting for response...")
+
+            result = client.wait_for_balance(timeout=60)
+            if result:
+                click.echo(f"Address: {result['pubkey']}")
+                click.echo(f"Balance: {result['sol']:.9f} SOL ({result['lamports']} lamports)")
+            else:
+                click.echo("Timed out waiting for balance response.")
     finally:
         client.close()
 

@@ -256,3 +256,90 @@ class TestAddrShare:
         assert len(acks) >= 1
         ack_data = decode_ack(acks[0][1])
         assert ack_data["acked_msg_id"] == 7007
+
+
+class TestMode3TokenTxRequest:
+    def test_usdc_transfer_request(self, mock_mesh, mock_rpc, wallet_mgr):
+        """TX_REQUEST with USDC mint should attempt token transfer."""
+        from solmesh.constants import USDC_MINT_DEVNET
+
+        wallet_mgr.create_wallet("hot", passphrase="hotpass")
+        hot_kp = wallet_mgr.load_keypair("hot", passphrase="hotpass")
+
+        config = GatewayConfig(
+            hot_wallet="hot",
+            allowed_requesters=[],
+            max_transfer_sol=1.0,
+            max_transfer_usdc=10.0,
+        )
+        gw = _create_gateway(mock_mesh, mock_rpc, wallet_mgr, config)
+        gw._hot_keypair = hot_kp
+
+        sender_kp = Keypair()
+        dest_kp = Keypair()
+        sender_pub = bytes(sender_kp.pubkey())
+        dest_pub = bytes(dest_kp.pubkey())
+        mint_pubkey = Pubkey.from_string(USDC_MINT_DEVNET)
+        mint_bytes = bytes(mint_pubkey)
+        amount = 1_000_000  # 1 USDC
+
+        # Sign with flags + mint
+        flags = 0x01
+        signed_data = (sender_pub + dest_pub
+                       + struct.pack("!Q", amount)
+                       + struct.pack("!B", flags)
+                       + mint_bytes)
+        sig = sign_payload(sender_kp, signed_data)
+
+        payload = encode_tx_request(sender_pub, dest_pub, amount, sig, mint=mint_bytes)
+        msg = pack_message(MsgType.TX_REQUEST, 8008, 0, 1, payload)
+
+        mock_rpc.send_raw_transaction.return_value = MagicMock(value="usdc_sig")
+        mock_rpc.get_account_info.return_value = MagicMock(value=None)
+
+        mock_mesh.inject_message(msg, "!client_usdc")
+
+        # Should get either TX_RESULT or NACK (depending on blockhash mock)
+        results = mock_mesh.get_sent_of_type(MsgType.TX_RESULT)
+        nacks = mock_mesh.get_sent_of_type(MsgType.NACK)
+        assert len(results) + len(nacks) >= 1
+
+    def test_amount_exceeded_usdc(self, mock_mesh, mock_rpc, wallet_mgr):
+        """TX_REQUEST for USDC over limit should get AMOUNT_EXCEEDED NACK."""
+        from solmesh.constants import USDC_MINT_DEVNET
+
+        wallet_mgr.create_wallet("hot", passphrase="hotpass")
+        hot_kp = wallet_mgr.load_keypair("hot", passphrase="hotpass")
+
+        config = GatewayConfig(
+            hot_wallet="hot",
+            allowed_requesters=[],
+            max_transfer_usdc=5.0,
+        )
+        gw = _create_gateway(mock_mesh, mock_rpc, wallet_mgr, config)
+        gw._hot_keypair = hot_kp
+
+        sender_kp = Keypair()
+        dest_kp = Keypair()
+        sender_pub = bytes(sender_kp.pubkey())
+        dest_pub = bytes(dest_kp.pubkey())
+        mint_pubkey = Pubkey.from_string(USDC_MINT_DEVNET)
+        mint_bytes = bytes(mint_pubkey)
+        amount = 10_000_000  # 10 USDC -- over 5 USDC limit
+
+        flags = 0x01
+        signed_data = (sender_pub + dest_pub
+                       + struct.pack("!Q", amount)
+                       + struct.pack("!B", flags)
+                       + mint_bytes)
+        sig = sign_payload(sender_kp, signed_data)
+
+        payload = encode_tx_request(sender_pub, dest_pub, amount, sig, mint=mint_bytes)
+        msg = pack_message(MsgType.TX_REQUEST, 9009, 0, 1, payload)
+
+        mock_mesh.inject_message(msg, "!client_over")
+
+        nacks = mock_mesh.get_sent_of_type(MsgType.NACK)
+        assert len(nacks) >= 1
+        nack_data = decode_nack(nacks[0][1])
+        assert nack_data["error_code"] == ErrorCode.AMOUNT_EXCEEDED

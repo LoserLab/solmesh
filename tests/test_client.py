@@ -239,3 +239,64 @@ class TestConditionRace:
         assert result is not None
         assert result["success"] is False
         assert "simulated error" in result["error"]
+
+
+class TestRequestTokenTransfer:
+    def test_sends_token_tx_request(self, client, wallet_mgr, mock_mesh):
+        """request_token_transfer should send TX_REQUEST with mint."""
+        from solmesh.constants import USDC_MINT_DEVNET
+        wallet_mgr.create_wallet("sender", passphrase="pass")
+        dest = str(Keypair().pubkey())
+
+        msg_id = client.request_token_transfer(
+            wallet_name="sender", destination=dest,
+            mint_address=USDC_MINT_DEVNET, amount=1.0,
+            decimals=6, passphrase="pass",
+        )
+        assert isinstance(msg_id, int)
+        requests = mock_mesh.get_sent_of_type(MsgType.TX_REQUEST)
+        assert len(requests) == 1
+
+        # Verify the payload contains the mint
+        from solmesh.protocol import decode_tx_request
+        req = decode_tx_request(requests[0][1])
+        assert req["flags"] & 0x01
+        assert len(req["mint"]) == 32
+        assert req["amount"] == 1_000_000  # 1 USDC in base units
+
+    def test_requires_gateway(self, mock_mesh, wallet_mgr):
+        """request_token_transfer without gateway should raise."""
+        from solmesh.constants import USDC_MINT_DEVNET
+        client = ClientNode(mesh=mock_mesh, wallet_manager=wallet_mgr)
+        client.connect()
+        wallet_mgr.create_wallet("sender2", passphrase="pass")
+        with pytest.raises(ValueError, match="Gateway node ID not set"):
+            client.request_token_transfer(
+                wallet_name="sender2", destination=str(Keypair().pubkey()),
+                mint_address=USDC_MINT_DEVNET, amount=1.0, passphrase="pass",
+            )
+
+
+class TestCheckTokenBalance:
+    def test_sends_token_balance_req(self, client, mock_mesh):
+        """check_token_balance should send BALANCE_REQ with mint."""
+        from solmesh.constants import USDC_MINT_DEVNET
+        pubkey = Keypair().pubkey()
+        address = str(pubkey)
+
+        msg_id = client.check_token_balance(address, USDC_MINT_DEVNET)
+        assert isinstance(msg_id, int)
+        reqs = mock_mesh.get_sent_of_type(MsgType.BALANCE_REQ)
+        assert len(reqs) == 1
+
+        from solmesh.protocol import decode_balance_req
+        req = decode_balance_req(reqs[0][1])
+        assert len(req["mint"]) == 32
+
+    def test_requires_gateway(self, mock_mesh, wallet_mgr):
+        """check_token_balance without gateway should raise."""
+        from solmesh.constants import USDC_MINT_DEVNET
+        client = ClientNode(mesh=mock_mesh, wallet_manager=wallet_mgr)
+        client.connect()
+        with pytest.raises(ValueError, match="Gateway node ID not set"):
+            client.check_token_balance(str(Keypair().pubkey()), USDC_MINT_DEVNET)

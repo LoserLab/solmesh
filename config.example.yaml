@@ -32,6 +32,13 @@ gateway:
   # Maximum SOL per Mode 3 transfer request
   max_transfer_sol: 0.1
 
+  # Maximum USDC per Mode 3 transfer request
+  max_transfer_usdc: 10.0
+
+  # Per-token limits by mint address (for tokens beyond USDC)
+  # token_limits:
+  #   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 10.0
+
   # Rate limiting (per sender)
   max_requests_per_minute: 10.0
   rate_limit_burst: 3

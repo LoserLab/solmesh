@@ -26,6 +26,21 @@ DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com"
 DEVNET_RPC_URL = "https://api.devnet.solana.com"
 TESTNET_RPC_URL = "https://api.testnet.solana.com"
 
+# SPL Token constants
+USDC_MINT_MAINNET = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+USDC_MINT_DEVNET = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+USDC_DECIMALS = 6
+USDC_BASE_UNITS_PER_TOKEN = 10 ** USDC_DECIMALS  # 1_000_000
+
+TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+ASSOCIATED_TOKEN_PROGRAM_ID = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+
+# Known token registry: mint address -> (symbol, decimals)
+KNOWN_TOKENS = {
+    USDC_MINT_MAINNET: ("USDC", 6),
+    USDC_MINT_DEVNET: ("USDC", 6),
+}
+
 
 class MsgType:
     """SolMesh message types (1 byte)."""
@@ -55,3 +70,4 @@ class ErrorCode:
     AMOUNT_EXCEEDED = 0x06
     INSUFFICIENT_BALANCE = 0x07
     RATE_LIMITED = 0x08
+    UNSUPPORTED_TOKEN = 0x09

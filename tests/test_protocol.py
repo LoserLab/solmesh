@@ -8,6 +8,7 @@ from solmesh.protocol import (
     BEACON_CAP_BLOCKHASH,
     BEACON_CAP_HOT_WALLET,
     BEACON_CAP_RELAY,
+    BEACON_CAP_SPL_TOKEN,
     crc8,
     pack_message,
     unpack_message,
@@ -319,3 +320,126 @@ class TestTxResult:
     def test_too_short(self):
         with pytest.raises(ValueError, match="too short"):
             decode_tx_result(b"\x00\x01")
+
+
+class TestTxRequestWithMint:
+    def test_round_trip_with_mint(self):
+        sig = bytes(range(64))
+        sender = bytes(range(32))
+        dest = bytes(range(32, 64))
+        amount = 1_000_000  # 1 USDC
+        mint = b"\xaa" * 32
+
+        payload = encode_tx_request(sender, dest, amount, sig, mint=mint)
+        result = decode_tx_request(payload)
+
+        assert result["signature"] == sig
+        assert result["sender_pubkey"] == sender
+        assert result["dest_pubkey"] == dest
+        assert result["amount"] == amount
+        assert result["flags"] == 0x01
+        assert result["mint"] == mint
+        assert result["memo"] == ""
+
+    def test_round_trip_with_mint_and_memo(self):
+        sig = b"\x00" * 64
+        sender = b"\x01" * 32
+        dest = b"\x02" * 32
+        mint = b"\x03" * 32
+
+        payload = encode_tx_request(sender, dest, 500_000, sig, memo="USDC payment", mint=mint)
+        result = decode_tx_request(payload)
+        assert result["mint"] == mint
+        assert result["memo"] == "USDC payment"
+        assert result["amount"] == 500_000
+
+    def test_backwards_compat_no_mint(self):
+        """SOL-only format should decode with flags=0, empty mint."""
+        sig = bytes(range(64))
+        sender = bytes(range(32))
+        dest = bytes(range(32, 64))
+        amount = 1_000_000_000
+
+        payload = encode_tx_request(sender, dest, amount, sig)
+        result = decode_tx_request(payload)
+
+        assert result["amount"] == amount
+        assert result["lamports"] == amount  # backwards compat alias
+        assert result["mint"] == b""
+        assert result["flags"] == 0x00
+
+    def test_invalid_mint_length(self):
+        with pytest.raises(ValueError, match="Mint must be 32"):
+            encode_tx_request(b"\x01" * 32, b"\x02" * 32, 100, b"\x00" * 64, mint=b"\x03" * 16)
+
+    def test_payload_size_within_chunk_limit(self):
+        """TX_REQUEST with mint must fit in a single 210-byte chunk."""
+        sig = b"\x00" * 64
+        sender = b"\x01" * 32
+        dest = b"\x02" * 32
+        mint = b"\x03" * 32
+        payload = encode_tx_request(sender, dest, 1_000_000, sig, mint=mint)
+        assert len(payload) <= MAX_CHUNK_DATA
+
+    def test_mint_flag_but_too_short(self):
+        """Payload with mint flag set but not enough bytes should raise."""
+        sig = b"\x00" * 64
+        sender = b"\x01" * 32
+        dest = b"\x02" * 32
+        # Manually build a payload with flags=0x01 but no mint bytes
+        payload = sig + sender + dest + struct.pack("!Q", 100) + b"\x01"
+        with pytest.raises(ValueError, match="has mint flag but too short"):
+            decode_tx_request(payload)
+
+
+class TestBalanceReqWithMint:
+    def test_round_trip_with_mint(self):
+        pubkey = b"\xcc" * 32
+        mint = b"\xdd" * 32
+        payload = encode_balance_req(pubkey, mint=mint)
+        result = decode_balance_req(payload)
+        assert result["pubkey"] == pubkey
+        assert result["mint"] == mint
+
+    def test_backwards_compat_no_mint(self):
+        pubkey = b"\xcc" * 32
+        payload = encode_balance_req(pubkey)
+        result = decode_balance_req(payload)
+        assert result["pubkey"] == pubkey
+        assert result["mint"] == b""
+
+    def test_invalid_mint_length(self):
+        with pytest.raises(ValueError, match="Mint must be 32"):
+            encode_balance_req(b"\xcc" * 32, mint=b"\xdd" * 16)
+
+
+class TestBalanceRespWithMint:
+    def test_round_trip_with_mint(self):
+        pubkey = b"\xdd" * 32
+        mint = b"\xee" * 32
+        amount = 5_000_000  # 5 USDC
+        payload = encode_balance_resp(pubkey, amount, mint=mint)
+        result = decode_balance_resp(payload)
+        assert result["pubkey"] == pubkey
+        assert result["amount"] == amount
+        assert result["mint"] == mint
+
+    def test_backwards_compat_no_mint(self):
+        pubkey = b"\xdd" * 32
+        payload = encode_balance_resp(pubkey, 5_000_000_000)
+        result = decode_balance_resp(payload)
+        assert result["lamports"] == 5_000_000_000
+        assert result["amount"] == 5_000_000_000
+        assert result["mint"] == b""
+
+    def test_invalid_mint_length(self):
+        with pytest.raises(ValueError, match="Mint must be 32"):
+            encode_balance_resp(b"\xdd" * 32, 100, mint=b"\xee" * 16)
+
+
+class TestBeaconSplTokenCap:
+    def test_spl_token_cap_flag(self):
+        caps = BEACON_CAP_RELAY | BEACON_CAP_SPL_TOKEN
+        payload = encode_gateway_beacon(1, caps, uptime_seconds=60)
+        result = decode_gateway_beacon(payload)
+        assert result["capabilities"] & BEACON_CAP_SPL_TOKEN
