@@ -184,6 +184,44 @@ solmesh listen --wallet mywallet --auto-discover
 
 The daemon validates your passphrase upfront, caches it in memory, and flushes pending intents each time a gateway beacon is received.
 
+### 9. HTTP API (Optional)
+
+SolMesh can expose a REST API for programmatic access to gateway functions. Requires `pip install solmesh[http]`.
+
+**Enable via CLI:**
+```bash
+solmesh gateway --http-port 8080 --api-key "your-secret-key" --rpc-url https://api.devnet.solana.com
+```
+
+**Or via config.yaml:**
+```yaml
+gateway:
+  http_port: 8080
+  api_key: "your-secret-key"
+```
+
+**Endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | /v1/status | Gateway info and uptime |
+| GET | /v1/balance/{address}?token= | SOL or SPL token balance |
+| GET | /v1/blockhash | Latest blockhash and last valid block height |
+| GET | /v1/slot | Current Solana slot |
+| POST | /v1/transfer | Submit transfer from gateway hot wallet |
+
+All endpoints require an `X-API-Key` header. The OpenAPI 3.0 spec is available at `/openapi.json`.
+
+**Examples:**
+```bash
+curl -H "X-API-Key: your-key" http://localhost:8080/v1/status
+curl -H "X-API-Key: your-key" http://localhost:8080/v1/balance/<SOLANA_ADDRESS>
+curl -H "X-API-Key: your-key" http://localhost:8080/openapi.json
+curl -H "X-API-Key: your-key" -X POST http://localhost:8080/v1/transfer \
+  -H "Content-Type: application/json" \
+  -d '{"destination": "<SOLANA_ADDRESS>", "amount": 0.01}'
+```
+
 ## Configuration
 
 Copy `config.example.yaml` to `config.yaml` and edit:
@@ -262,6 +300,7 @@ Message types: `TX_CHUNK`, `TX_REQUEST`, `ADDR_SHARE`, `ACK`, `NACK`, `BALANCE_R
 - CRC-8 integrity check on all protocol messages (on top of LoRa's FEC)
 - Chunk reassembly is keyed by `(sender_id, msg_id)` to prevent cross-sender collisions
 - Store-and-forward queue stores only unsigned intent parameters (wallet name, recipient address, amount) -- **no secrets on disk**. Passphrases are held in memory only. Queue files use atomic writes (`tempfile` + `os.replace()`), `0600` permissions, and `fcntl.flock`-based file locking for inter-process safety. SENDING intents are recovered to PENDING on restart.
+- HTTP API requires an API key (`X-API-Key` header) on every request. The gateway refuses to start the HTTP server without an `api_key` configured. HTTP callers get separate rate-limit buckets from mesh senders. Same transfer limits as mesh Mode 3.
 
 ## Disclaimer
 

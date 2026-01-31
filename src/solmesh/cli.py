@@ -86,8 +86,13 @@ def cli(ctx, config_path, verbose):
               help="Passphrase for hot wallet (prompted if hot-wallet is set)")
 @click.option("--beacon-interval", type=int, default=None,
               help="Beacon broadcast interval in seconds (default: 60)")
+@click.option("--http-port", type=int, default=None,
+              help="Enable HTTP API on this port (requires solmesh[http])")
+@click.option("--api-key", default=None,
+              help="API key for HTTP API authentication")
 @click.pass_context
-def gateway(ctx, rpc_url, hot_wallet, passphrase, beacon_interval):
+def gateway(ctx, rpc_url, hot_wallet, passphrase, beacon_interval,
+            http_port, api_key):
     """Run as a gateway node (internet-connected, relays to Solana)."""
     from solmesh.gateway import GatewayNode
 
@@ -99,6 +104,10 @@ def gateway(ctx, rpc_url, hot_wallet, passphrase, beacon_interval):
         config.gateway.hot_wallet = hot_wallet
     if beacon_interval is not None:
         config.gateway.beacon_interval = beacon_interval
+    if http_port is not None:
+        config.gateway.http_port = http_port
+    if api_key is not None:
+        config.gateway.api_key = api_key
 
     # Prompt for passphrase if hot wallet is set but passphrase wasn't provided
     if config.gateway.hot_wallet and not passphrase:
@@ -121,6 +130,8 @@ def gateway(ctx, rpc_url, hot_wallet, passphrase, beacon_interval):
     if config.gateway.hot_wallet:
         click.echo(f"  Hot wallet: {config.gateway.hot_wallet}")
         click.echo(f"  Max transfer: {config.gateway.max_transfer_sol} SOL / {config.gateway.max_transfer_usdc} USDC")
+    if config.gateway.http_port:
+        click.echo(f"  HTTP API:   port {config.gateway.http_port}")
     click.echo()
 
     gw.start(hot_wallet_passphrase=passphrase)

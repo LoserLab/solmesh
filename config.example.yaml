@@ -46,5 +46,11 @@ gateway:
   # Gateway beacon broadcast interval (seconds)
   beacon_interval: 60
 
+  # HTTP API (optional, requires solmesh[http])
+  # Enable a REST API for programmatic access to gateway functions.
+  # Requires both http_port and api_key to be set.
+  # http_port: 8080
+  # api_key: "your-secret-api-key-here"
+
 # Logging level: DEBUG, INFO, WARNING, ERROR
 log_level: INFO

@@ -105,6 +105,9 @@ class GatewayNode:
         self._running = True
         self._start_beacon_thread()
 
+        if self._config.http_port:
+            self._start_http_server()
+
         logger.info("Gateway node started. Listening for SolMesh messages...")
         self._mesh.run()
 
@@ -114,6 +117,35 @@ class GatewayNode:
             target=self._beacon_loop, daemon=True
         )
         self._beacon_thread.start()
+
+    def _start_http_server(self) -> None:
+        """Start the FastAPI HTTP server on a daemon thread."""
+        if not self._config.api_key:
+            raise ValueError("api_key is required when http_port is set")
+
+        try:
+            from solmesh.http_api import create_api
+        except ImportError:
+            raise ImportError(
+                "FastAPI/uvicorn not installed. "
+                "Install with: pip install solmesh[http]"
+            )
+
+        import uvicorn
+
+        app = create_api(self)
+        config = uvicorn.Config(
+            app,
+            host="0.0.0.0",
+            port=self._config.http_port,
+            log_level="info",
+        )
+        server = uvicorn.Server(config)
+        http_thread = threading.Thread(
+            target=server.run, daemon=True, name="http-api"
+        )
+        http_thread.start()
+        logger.info("HTTP API started on port %d", self._config.http_port)
 
     def _beacon_loop(self) -> None:
         """Periodically broadcast gateway beacon."""

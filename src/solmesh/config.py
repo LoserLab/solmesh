@@ -48,6 +48,8 @@ class GatewayConfig:
     max_requests_per_minute: float = 10.0
     rate_limit_burst: int = 3
     beacon_interval: int = 60
+    http_port: Optional[int] = None
+    api_key: Optional[str] = None
 
     def get_max_transfer_token(self, mint_address: str) -> Optional[float]:
         """Get the max transfer amount for a token by its mint address.
@@ -102,6 +104,8 @@ def load_config(path: Path) -> SolMeshConfig:
             max_requests_per_minute=g.get("max_requests_per_minute", 10.0),
             rate_limit_burst=g.get("rate_limit_burst", 3),
             beacon_interval=g.get("beacon_interval", 60),
+            http_port=g.get("http_port"),
+            api_key=g.get("api_key"),
         )
 
     config.log_level = raw.get("log_level", "INFO")
