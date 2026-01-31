@@ -19,6 +19,7 @@ from solmesh.constants import (
     ACK_TIMEOUT,
     KNOWN_TOKENS,
     LAMPORTS_PER_SOL,
+    MAX_FLUSH_ATTEMPTS,
     MAX_RETRIES,
     MsgType,
     RETRY_DELAY,
@@ -54,7 +55,9 @@ class ClientNode:
 
     def __init__(self, mesh: MeshInterface,
                  wallet_manager: WalletManager,
-                 gateway_node_id: Optional[str] = None):
+                 gateway_node_id: Optional[str] = None,
+                 intent_store: Optional['IntentStore'] = None,
+                 auto_flush: bool = False):
         self._mesh = mesh
         self._wallet_mgr = wallet_manager
         self._gateway_id = gateway_node_id
@@ -68,6 +71,12 @@ class ClientNode:
         self._balance_cond = threading.Condition()
         self._blockhash_cond = threading.Condition()
         self._gateway_cond = threading.Condition()
+        # Store-and-forward
+        self._intent_store = intent_store
+        self._auto_flush = auto_flush
+        self._flush_lock = threading.Lock()
+        self._flushing = False
+        self._passphrase_cache: dict[str, str] = {}
 
     def connect(self) -> None:
         """Connect to mesh and register handlers."""
@@ -413,6 +422,203 @@ class ClientNode:
             key = max(self._balances.keys())
             return self._balances.pop(key)
 
+    # --- Store-and-forward ---
+
+    def cache_passphrase(self, wallet_name: str, passphrase: str) -> None:
+        """Cache a wallet passphrase in memory (never written to disk)."""
+        self._passphrase_cache[wallet_name] = passphrase
+
+    def queue_intent(self, mode: int, wallet_name: str, recipient: str,
+                     amount: float, token_mint: Optional[str] = None,
+                     token_decimals: int = 0,
+                     passphrase: Optional[str] = None):
+        """Queue a transaction intent for later sending.
+
+        Validates that the wallet exists. If passphrase is provided,
+        validates it by attempting to load the keypair.
+        Does NOT require a mesh connection or gateway.
+
+        Returns the created Intent.
+        """
+        from solmesh.store import Intent
+
+        if self._intent_store is None:
+            raise RuntimeError("IntentStore not configured")
+        if mode not in (1, 3):
+            raise ValueError(f"Invalid mode: {mode}. Must be 1 or 3.")
+
+        self._wallet_mgr.get_pubkey(wallet_name)
+
+        if passphrase is not None:
+            self._wallet_mgr.load_keypair(wallet_name, passphrase=passphrase)
+            self._passphrase_cache[wallet_name] = passphrase
+
+        intent = Intent(
+            mode=mode,
+            wallet_name=wallet_name,
+            recipient=recipient,
+            amount=amount,
+            token_mint=token_mint,
+            token_decimals=token_decimals,
+            max_attempts=MAX_FLUSH_ATTEMPTS,
+        )
+        return self._intent_store.add(intent)
+
+    def flush_intent(self, intent: dict, passphrase: str) -> dict:
+        """Flush a single intent: send it over mesh and wait for result.
+
+        Sets status to SENDING, dispatches via the appropriate mode,
+        waits for result, updates status to SENT or increments attempts.
+
+        InvalidTag (wrong passphrase) does NOT increment attempts.
+        """
+        from solmesh.store import IntentStatus
+
+        if self._intent_store is None:
+            raise RuntimeError("IntentStore not configured")
+
+        intent_id = intent["id"]
+        self._intent_store.update_status(intent_id, IntentStatus.SENDING.value)
+
+        try:
+            if intent["mode"] == 3:
+                if intent.get("token_mint"):
+                    msg_id = self.request_token_transfer(
+                        wallet_name=intent["wallet_name"],
+                        destination=intent["recipient"],
+                        mint_address=intent["token_mint"],
+                        amount=intent["amount"],
+                        decimals=intent.get("token_decimals", 6),
+                        passphrase=passphrase,
+                    )
+                else:
+                    msg_id = self.request_transfer(
+                        wallet_name=intent["wallet_name"],
+                        destination=intent["recipient"],
+                        amount_sol=intent["amount"],
+                        passphrase=passphrase,
+                    )
+            elif intent["mode"] == 1:
+                if intent.get("token_mint"):
+                    msg_id = self.relay_signed_token_tx(
+                        wallet_name=intent["wallet_name"],
+                        recipient=intent["recipient"],
+                        mint_address=intent["token_mint"],
+                        amount=intent["amount"],
+                        decimals=intent.get("token_decimals", 6),
+                        passphrase=passphrase,
+                    )
+                else:
+                    msg_id = self.relay_signed_tx(
+                        wallet_name=intent["wallet_name"],
+                        recipient=intent["recipient"],
+                        amount_sol=intent["amount"],
+                        passphrase=passphrase,
+                    )
+            else:
+                raise ValueError(f"Unsupported intent mode: {intent['mode']}")
+
+        except Exception as e:
+            if "InvalidTag" in type(e).__name__:
+                self._intent_store.update_status(
+                    intent_id, IntentStatus.PENDING.value,
+                    error=f"Wrong passphrase: {e}",
+                )
+                raise
+            self._intent_store.increment_attempts(intent_id)
+            current = self._intent_store.get(intent_id)
+            status = current.get("status", IntentStatus.PENDING.value) if current else IntentStatus.PENDING.value
+            self._intent_store.update_status(intent_id, status, error=str(e))
+            return {"success": False, "error": str(e)}
+
+        self._intent_store.increment_attempts(intent_id)
+
+        result = self.wait_for_result(msg_id, timeout=ACK_TIMEOUT)
+        if result and result.get("success"):
+            self._intent_store.update_status(
+                intent_id, IntentStatus.SENT.value,
+                tx_hash=result.get("signature"),
+            )
+        elif result:
+            current = self._intent_store.get(intent_id)
+            if current and current.get("status") != IntentStatus.FAILED.value:
+                self._intent_store.update_status(
+                    intent_id, IntentStatus.PENDING.value,
+                    error=result.get("error", "Unknown error"),
+                )
+        else:
+            current = self._intent_store.get(intent_id)
+            if current and current.get("status") != IntentStatus.FAILED.value:
+                self._intent_store.update_status(
+                    intent_id, IntentStatus.PENDING.value,
+                    error="Timeout waiting for result",
+                )
+
+        return result or {"success": False, "error": "Timeout"}
+
+    def flush_all_pending(self, passphrase_map: Optional[dict] = None,
+                          wallet_filter: Optional[str] = None) -> list:
+        """Flush all pending intents sequentially.
+
+        Args:
+            passphrase_map: dict of wallet_name -> passphrase (overrides cache)
+            wallet_filter: if set, only flush intents for this wallet name
+
+        Returns list of result dicts.
+        """
+        if self._intent_store is None:
+            raise RuntimeError("IntentStore not configured")
+
+        passphrase_map = passphrase_map or {}
+        results = []
+
+        with self._intent_store.flush_lock():
+            pending = self._intent_store.pending_intents()
+
+            for intent in pending:
+                if wallet_filter and intent.get("wallet_name") != wallet_filter:
+                    continue
+
+                wallet_name = intent["wallet_name"]
+                passphrase = passphrase_map.get(wallet_name)
+                if passphrase is None:
+                    passphrase = self._passphrase_cache.get(wallet_name)
+                if passphrase is None:
+                    logger.warning(
+                        "Skipping intent %s: no passphrase for wallet '%s'",
+                        intent["id"], wallet_name,
+                    )
+                    continue
+
+                if not self.is_gateway_online():
+                    logger.warning("Gateway offline, stopping flush")
+                    break
+
+                try:
+                    result = self.flush_intent(intent, passphrase)
+                    results.append({"intent_id": intent["id"], **result})
+                except Exception as e:
+                    logger.error("Failed to flush intent %s: %s", intent["id"], e)
+                    results.append({
+                        "intent_id": intent["id"],
+                        "success": False,
+                        "error": str(e),
+                    })
+
+        return results
+
+    def _auto_flush_pending(self) -> None:
+        """Background auto-flush triggered by beacon. Non-blocking lock."""
+        if not self._flush_lock.acquire(blocking=False):
+            logger.debug("Auto-flush skipped: already flushing")
+            return
+        try:
+            self._flushing = True
+            self.flush_all_pending()
+        finally:
+            self._flushing = False
+            self._flush_lock.release()
+
     # --- Handlers ---
 
     def _handle_ack(self, header: SolMeshHeader, payload: bytes,
@@ -525,6 +731,13 @@ class ClientNode:
             sender_id, beacon["version"], beacon["capabilities"],
             beacon["uptime_seconds"],
         )
+        # Trigger auto-flush if enabled and there are pending intents
+        if (self._auto_flush
+                and self._intent_store is not None
+                and self._intent_store.pending_intents()):
+            threading.Thread(
+                target=self._auto_flush_pending, daemon=True
+            ).start()
 
     def _handle_addr_share(self, header: SolMeshHeader, payload: bytes,
                            sender_id: str) -> None:

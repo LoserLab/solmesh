@@ -144,6 +144,46 @@ solmesh balance --address <SOLANA_ADDRESS> --token USDC --gateway-node '!aabbccd
 solmesh share-address --wallet mywallet --label "Field Node Alpha"
 ```
 
+### 8. Store-and-Forward (Deferred Transactions)
+
+Queue transactions when no gateway is available, flush them when connectivity returns.
+
+**Queue a transaction (no mesh connection needed):**
+```bash
+solmesh send deferred \
+  --wallet mywallet \
+  --to <RECIPIENT_ADDRESS> \
+  --amount 0.1 \
+  --mode 3
+```
+
+Mode 1 (sign locally and relay) and Mode 3 (gateway transfer) are both supported. Intents are stored in `~/.solmesh/queue.json`.
+
+**View queued intents:**
+```bash
+solmesh queue list
+solmesh queue list --status pending --json
+```
+
+**Flush queued intents when a gateway is available:**
+```bash
+solmesh queue flush --auto-discover
+solmesh queue flush --gateway-node '!aabbccdd' --wallet mywallet
+```
+
+**Manage the queue:**
+```bash
+solmesh queue clear --status failed
+solmesh queue remove <INTENT_ID>
+```
+
+**Auto-flush daemon** -- listens for gateway beacons and flushes automatically:
+```bash
+solmesh listen --wallet mywallet --auto-discover
+```
+
+The daemon validates your passphrase upfront, caches it in memory, and flushes pending intents each time a gateway beacon is received.
+
 ## Configuration
 
 Copy `config.example.yaml` to `config.yaml` and edit:
@@ -221,6 +261,7 @@ Message types: `TX_CHUNK`, `TX_REQUEST`, `ADDR_SHARE`, `ACK`, `NACK`, `BALANCE_R
 - Per-sender token bucket rate limiting protects the gateway from abuse
 - CRC-8 integrity check on all protocol messages (on top of LoRa's FEC)
 - Chunk reassembly is keyed by `(sender_id, msg_id)` to prevent cross-sender collisions
+- Store-and-forward queue stores only unsigned intent parameters (wallet name, recipient address, amount) -- **no secrets on disk**. Passphrases are held in memory only. Queue files use atomic writes (`tempfile` + `os.replace()`), `0600` permissions, and `fcntl.flock`-based file locking for inter-process safety. SENDING intents are recovered to PENDING on restart.
 
 ## Disclaimer
 

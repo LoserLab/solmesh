@@ -19,6 +19,7 @@ ACK_TIMEOUT = 30  # seconds
 MAX_RETRIES = 3
 RETRY_DELAY = 10  # seconds
 INTER_CHUNK_DELAY = 2.0  # seconds between chunks
+MAX_FLUSH_ATTEMPTS = 3  # max end-to-end send attempts per queued intent
 
 # Solana
 LAMPORTS_PER_SOL = 1_000_000_000

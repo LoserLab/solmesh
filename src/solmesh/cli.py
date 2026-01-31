@@ -295,6 +295,68 @@ def send_request(ctx, wallet, recipient, amount, token, gateway_node, auto_disco
         client.close()
 
 
+@send.command("deferred")
+@click.option("--wallet", "-w", required=True, help="Local wallet name")
+@click.option("--to", "recipient", required=True, help="Recipient Solana address")
+@click.option("--amount", "-a", required=True, type=float, help="Amount (SOL or token units)")
+@click.option("--token", default=None, help="Token: 'USDC' or mint address (default: SOL)")
+@click.option("--mode", "send_mode", type=click.Choice(["1", "3"]), default="3",
+              help="Send mode: 1=sign+relay, 3=gateway request (default: 3)")
+@click.option("--passphrase", prompt=True, hide_input=True, default="",
+              help="Wallet passphrase (validates ownership)")
+@click.pass_context
+def send_deferred(ctx, wallet, recipient, amount, token, send_mode, passphrase):
+    """Queue a transaction intent for later sending (no mesh needed)."""
+    from solmesh.client import ClientNode
+    from solmesh.store import IntentStore
+
+    config = ctx.obj["config"]
+    wm = WalletManager()
+    store = IntentStore()
+
+    client = ClientNode(
+        mesh=None,
+        wallet_manager=wm,
+        intent_store=store,
+    )
+
+    int_mode = int(send_mode)
+    token_mint = None
+    token_decimals = 0
+    symbol = "SOL"
+    if token:
+        token_mint, token_decimals, symbol = _resolve_token(token, config.solana.network)
+
+    try:
+        intent = client.queue_intent(
+            mode=int_mode,
+            wallet_name=wallet,
+            recipient=recipient,
+            amount=amount,
+            token_mint=token_mint,
+            token_decimals=token_decimals,
+            passphrase=passphrase if passphrase else None,
+        )
+        click.echo(f"Intent queued: {intent.id}")
+        click.echo(f"  Mode:   {int_mode}")
+        click.echo(f"  From:   {wallet}")
+        click.echo(f"  To:     {recipient}")
+        click.echo(f"  Amount: {amount} {symbol}")
+        click.echo()
+        click.echo("Flush with: solmesh queue flush --passphrase ...")
+    except FileNotFoundError:
+        click.echo(f"Error: Wallet '{wallet}' not found.", err=True)
+        sys.exit(1)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        if "InvalidTag" in type(e).__name__:
+            click.echo("Error: Wrong passphrase.", err=True)
+            sys.exit(1)
+        raise
+
+
 # --- Address sharing ---
 
 @cli.command("share-address")
@@ -498,6 +560,209 @@ def wallet_delete(name):
     except FileNotFoundError:
         click.echo(f"Error: Wallet '{name}' not found.", err=True)
         sys.exit(1)
+
+
+# --- Queue management ---
+
+@cli.group()
+@click.pass_context
+def queue(ctx):
+    """Manage the deferred transaction queue."""
+    pass
+
+
+@queue.command("list")
+@click.option("--status", type=click.Choice(["pending", "sending", "sent", "failed"]),
+              default=None, help="Filter by status")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def queue_list(ctx, status, as_json):
+    """List queued transaction intents."""
+    import json as json_mod
+    from solmesh.store import IntentStore
+
+    store = IntentStore()
+    intents = store.list_intents(status=status)
+
+    if as_json:
+        click.echo(json_mod.dumps(intents, indent=2))
+        return
+
+    if not intents:
+        click.echo("No intents found.")
+        return
+
+    click.echo(f"{'ID':<14} {'Status':<10} {'Mode':<6} {'Wallet':<15} {'Amount':<12} {'Recipient':<44} {'Attempts'}")
+    click.echo("-" * 110)
+    for i in intents:
+        token_label = ""
+        if i.get("token_mint"):
+            from solmesh.constants import KNOWN_TOKENS
+            info = KNOWN_TOKENS.get(i["token_mint"])
+            token_label = f" {info[0]}" if info else f" TOKEN"
+        else:
+            token_label = " SOL"
+        click.echo(
+            f"{i['id']:<14} {i['status']:<10} {i.get('mode', '?'):<6} "
+            f"{i['wallet_name']:<15} {i['amount']:<12}{token_label:<6} "
+            f"{i['recipient'][:44]:<44} "
+            f"{i.get('attempts', 0)}/{i.get('max_attempts', 3)}"
+        )
+
+
+@queue.command("flush")
+@click.option("--passphrase", prompt=True, hide_input=True, default="",
+              help="Wallet passphrase")
+@click.option("--wallet", "-w", default=None, help="Only flush intents for this wallet")
+@click.option("--gateway-node", "-g", default=None, help="Gateway mesh node ID")
+@click.option("--auto-discover", is_flag=True, help="Auto-discover gateway via beacon")
+@click.pass_context
+def queue_flush(ctx, passphrase, wallet, gateway_node, auto_discover):
+    """Connect to mesh, discover gateway, and flush pending intents."""
+    from solmesh.client import ClientNode
+    from solmesh.store import IntentStore
+
+    config = ctx.obj["config"]
+    store = IntentStore()
+
+    pending = store.pending_intents()
+    if not pending:
+        click.echo("No pending intents to flush.")
+        return
+
+    mesh = build_mesh(config)
+    wm = WalletManager()
+
+    client = ClientNode(
+        mesh=mesh,
+        wallet_manager=wm,
+        gateway_node_id=gateway_node,
+        intent_store=store,
+    )
+    client.connect()
+
+    if auto_discover and not gateway_node:
+        click.echo("Discovering gateway via beacon...")
+        gw = client.discover_gateway(timeout=120)
+        if not gw:
+            click.echo("No gateway found.", err=True)
+            client.close()
+            sys.exit(1)
+        click.echo(f"  Found gateway: {gw}")
+
+    wallet_names = set(i["wallet_name"] for i in pending)
+    if wallet:
+        wallet_names = {wallet}
+    passphrase_map = {w: passphrase for w in wallet_names}
+
+    try:
+        click.echo(f"Flushing {len(pending)} pending intent(s)...")
+        results = client.flush_all_pending(
+            passphrase_map=passphrase_map,
+            wallet_filter=wallet,
+        )
+        for r in results:
+            intent_id = r.get("intent_id", "?")
+            if r.get("success"):
+                click.echo(f"  {intent_id}: OK (tx: {r.get('signature', '?')})")
+            else:
+                click.echo(f"  {intent_id}: FAILED ({r.get('error', '?')})")
+    finally:
+        client.close()
+
+
+@queue.command("clear")
+@click.option("--status", type=click.Choice(["pending", "sending", "sent", "failed"]),
+              default=None, help="Only clear intents with this status (default: all)")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@click.pass_context
+def queue_clear(ctx, status, yes):
+    """Remove intents from the queue."""
+    from solmesh.store import IntentStore
+
+    store = IntentStore()
+    label = status or "all"
+    if not yes:
+        click.confirm(f"Remove {label} intents?", abort=True)
+    count = store.clear(status=status)
+    click.echo(f"Removed {count} intent(s).")
+
+
+@queue.command("remove")
+@click.argument("intent_id")
+@click.pass_context
+def queue_remove(ctx, intent_id):
+    """Remove a single intent by ID."""
+    from solmesh.store import IntentStore
+
+    store = IntentStore()
+    if store.remove(intent_id):
+        click.echo(f"Removed intent {intent_id}.")
+    else:
+        click.echo(f"Intent '{intent_id}' not found.", err=True)
+        sys.exit(1)
+
+
+# --- Listen daemon ---
+
+@cli.command("listen")
+@click.option("--wallet", "-w", required=True, help="Wallet name for auto-flush")
+@click.option("--passphrase", prompt=True, hide_input=True, default="",
+              help="Wallet passphrase (cached in memory)")
+@click.option("--gateway-node", "-g", default=None, help="Gateway mesh node ID")
+@click.option("--auto-discover", is_flag=True, help="Auto-discover gateway via beacon")
+@click.pass_context
+def listen(ctx, wallet, passphrase, gateway_node, auto_discover):
+    """Long-running daemon that auto-flushes queued intents on gateway beacon."""
+    import time as time_mod
+    from solmesh.client import ClientNode
+    from solmesh.store import IntentStore
+
+    config = ctx.obj["config"]
+    mesh = build_mesh(config)
+    wm = WalletManager()
+    store = IntentStore()
+
+    try:
+        wm.load_keypair(wallet, passphrase=passphrase)
+    except FileNotFoundError:
+        click.echo(f"Error: Wallet '{wallet}' not found.", err=True)
+        sys.exit(1)
+    except Exception as e:
+        if "InvalidTag" in type(e).__name__:
+            click.echo("Error: Wrong passphrase.", err=True)
+            sys.exit(1)
+        raise
+
+    client = ClientNode(
+        mesh=mesh,
+        wallet_manager=wm,
+        gateway_node_id=gateway_node,
+        intent_store=store,
+        auto_flush=True,
+    )
+    client.cache_passphrase(wallet, passphrase)
+    client.connect()
+
+    if auto_discover and not gateway_node:
+        click.echo("Discovering gateway via beacon...")
+        gw = client.discover_gateway(timeout=120)
+        if not gw:
+            click.echo("No gateway found.", err=True)
+            client.close()
+            sys.exit(1)
+        click.echo(f"  Found gateway: {gw}")
+
+    click.echo("Listening for beacons. Queued intents will auto-flush.")
+    click.echo("Press Ctrl+C to stop.")
+
+    try:
+        while True:
+            time_mod.sleep(1)
+    except KeyboardInterrupt:
+        click.echo("\nStopping...")
+    finally:
+        client.close()
 
 
 def main():
