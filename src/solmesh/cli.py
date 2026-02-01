@@ -32,10 +32,11 @@ def build_mesh(config: SolMeshConfig) -> MeshInterface:
 def _resolve_token(token_str: str, network: str = "devnet") -> tuple[str, int, str]:
     """Resolve a token identifier to (mint_address, decimals, symbol).
 
-    Accepts 'USDC' (case-insensitive) or a full base58 mint address.
+    Accepts 'USDC', 'FXN' (case-insensitive) or a full base58 mint address.
     """
     from solmesh.constants import (
         USDC_MINT_MAINNET, USDC_MINT_DEVNET,
+        FXN_MINT_MAINNET, FXN_DECIMALS,
         KNOWN_TOKENS, USDC_DECIMALS,
     )
 
@@ -45,6 +46,11 @@ def _resolve_token(token_str: str, network: str = "devnet") -> tuple[str, int, s
             return USDC_MINT_MAINNET, USDC_DECIMALS, "USDC"
         else:
             return USDC_MINT_DEVNET, USDC_DECIMALS, "USDC"
+
+    if upper == "FXN":
+        if network != "mainnet-beta":
+            raise click.ClickException("FXN is only available on mainnet-beta")
+        return FXN_MINT_MAINNET, FXN_DECIMALS, "FXN"
 
     # Assume it's a raw mint address
     info = KNOWN_TOKENS.get(token_str)

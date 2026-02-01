@@ -38,6 +38,7 @@ gateway:
   # Per-token limits by mint address (for tokens beyond USDC)
   # token_limits:
   #   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 10.0
+  #   "92cRC6kV5D7TiHX1j56AbkPbffo9jwcXxSDQZ8Mopump": 100.0  # FXN
 
   # Rate limiting (per sender)
   max_requests_per_minute: 10.0

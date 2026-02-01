@@ -65,11 +65,14 @@ class ErrorResponse(BaseModel):
 # --- Helpers ---
 
 def _resolve_token_mint(token_input: str) -> str:
-    """Resolve 'USDC' shorthand or return raw mint address."""
-    from solmesh.constants import USDC_MINT_DEVNET
+    """Resolve 'USDC'/'FXN' shorthand or return raw mint address."""
+    from solmesh.constants import USDC_MINT_DEVNET, FXN_MINT_MAINNET
 
-    if token_input.upper() == "USDC":
+    upper = token_input.upper()
+    if upper == "USDC":
         return USDC_MINT_DEVNET
+    if upper == "FXN":
+        return FXN_MINT_MAINNET
     return token_input
 
 

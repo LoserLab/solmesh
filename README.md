@@ -94,7 +94,7 @@ solmesh send request \
 
 ### 5. Send USDC or SPL tokens
 
-All send commands accept a `--token` flag. Use `USDC` as a shorthand or pass any SPL token mint address directly.
+All send commands accept a `--token` flag. Use `USDC` or `FXN` as shorthands, or pass any SPL token mint address directly. Note: FXN is mainnet only.
 
 **Mode 1** - Sign a USDC transfer locally and relay:
 ```bash
