@@ -306,7 +306,9 @@ Message types: `TX_CHUNK`, `TX_REQUEST`, `ADDR_SHARE`, `ACK`, `NACK`, `BALANCE_R
 
 SolMesh is experimental software provided "as-is" without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and noninfringement.
 
-SolMesh is a self-custody tool -- keys are generated and stored locally on your device and are never sent to any server. You are solely responsible for your own wallets, private keys, mnemonic phrases, and funds.
+SolMesh is a self-custody tool -- keys are generated and stored locally on your device and are never sent to any server. You are solely responsible for your own wallets, private keys, mnemonic phrases, and funds. The authors and contributors do not have access to, do not store, and cannot retrieve your private keys or wallet files under any circumstances.
+
+**No Custody or Recovery**: The authors and contributors do not custody, manage, or have any access to user wallets, private keys, or funds. There is no recovery service, no support process, and no mechanism by which the authors can access, freeze, reverse, or restore any wallet or transaction. You alone control your keys and bear full responsibility for their safekeeping.
 
 The authors and contributors shall not be held liable for any loss of funds, lost keys, failed transactions, security breaches, hacks, or any other damages arising from the use of this software. By using SolMesh, you agree to hold the authors and contributors harmless from any and all claims, losses, or liabilities.
 

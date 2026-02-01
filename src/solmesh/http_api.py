@@ -10,6 +10,7 @@ with all endpoints bound to the gateway instance via closures.
 from __future__ import annotations
 
 import logging
+import secrets
 import time
 from typing import Optional
 
@@ -98,7 +99,7 @@ def create_api(gateway) -> "FastAPI":
     def verify_api_key(x_api_key: str = Header(...)) -> str:
         """Validate X-API-Key header against gateway config."""
         expected = gateway._config.api_key
-        if not expected or x_api_key != expected:
+        if not expected or not secrets.compare_digest(x_api_key, expected):
             raise HTTPException(status_code=401, detail="Invalid API key")
         return x_api_key
 

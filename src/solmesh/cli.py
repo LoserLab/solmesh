@@ -29,10 +29,12 @@ def build_mesh(config: SolMeshConfig) -> MeshInterface:
     )
 
 
-def _resolve_token(token_str: str, network: str = "devnet") -> tuple[str, int, str]:
-    """Resolve a token identifier to (mint_address, decimals, symbol).
+def _resolve_token(token: Optional[str], usdc: bool, fxn: bool,
+                    network: str = "devnet") -> tuple[Optional[str], int, str]:
+    """Resolve --usdc/--fxn flag or --token to (mint_address, decimals, symbol).
 
-    Accepts 'USDC', 'FXN' (case-insensitive) or a full base58 mint address.
+    Returns (None, 9, "SOL") when no token flag is set.
+    Raises click.UsageError if conflicting flags are provided.
     """
     from solmesh.constants import (
         USDC_MINT_MAINNET, USDC_MINT_DEVNET,
@@ -40,26 +42,49 @@ def _resolve_token(token_str: str, network: str = "devnet") -> tuple[str, int, s
         KNOWN_TOKENS, USDC_DECIMALS,
     )
 
-    upper = token_str.upper()
-    if upper == "USDC":
+    flags_set = sum([bool(usdc), bool(fxn), bool(token)])
+    if flags_set > 1:
+        raise click.UsageError("Cannot use --usdc, --fxn, and --token together.")
+
+    if usdc:
         if network == "mainnet-beta":
             return USDC_MINT_MAINNET, USDC_DECIMALS, "USDC"
-        else:
+        elif network in ("devnet", "testnet"):
             return USDC_MINT_DEVNET, USDC_DECIMALS, "USDC"
+        else:
+            raise click.UsageError(
+                f"No USDC mint configured for network '{network}'. "
+                f"Use --token with the mint address instead."
+            )
 
-    if upper == "FXN":
+    if fxn:
         if network != "mainnet-beta":
-            raise click.ClickException("FXN is only available on mainnet-beta")
+            raise click.UsageError(
+                f"FXN is only available on mainnet-beta. "
+                f"Use --token with the mint address instead."
+            )
         return FXN_MINT_MAINNET, FXN_DECIMALS, "FXN"
 
-    # Assume it's a raw mint address
-    info = KNOWN_TOKENS.get(token_str)
-    if info:
-        symbol, decimals = info
-        return token_str, decimals, symbol
+    if token:
+        upper = token.upper()
+        if upper == "USDC":
+            if network == "mainnet-beta":
+                return USDC_MINT_MAINNET, USDC_DECIMALS, "USDC"
+            else:
+                return USDC_MINT_DEVNET, USDC_DECIMALS, "USDC"
+        if upper == "FXN":
+            if network != "mainnet-beta":
+                raise click.UsageError("FXN is only available on mainnet-beta")
+            return FXN_MINT_MAINNET, FXN_DECIMALS, "FXN"
+        # Raw mint address
+        info = KNOWN_TOKENS.get(token)
+        if info:
+            symbol, decimals = info
+            return token, decimals, symbol
+        return token, 6, f"TOKEN({token[:8]}...)"
 
-    # Unknown token -- default to 6 decimals
-    return token_str, 6, f"TOKEN({token_str[:8]}...)"
+    # No token flag -- native SOL
+    return None, 9, "SOL"
 
 
 @click.group()
@@ -157,6 +182,8 @@ def send(ctx):
 @click.option("--to", "recipient", required=True, help="Recipient Solana address")
 @click.option("--amount", "-a", required=True, type=float, help="Amount (SOL or token units)")
 @click.option("--token", default=None, help="Token to send: 'USDC' or a mint address (default: SOL)")
+@click.option("--usdc", is_flag=True, help="Send USDC (auto-resolves mint address for current network)")
+@click.option("--fxn", is_flag=True, help="Send FXN (mainnet-beta only)")
 @click.option("--create-ata", is_flag=True, help="Create recipient token account if needed")
 @click.option("--blockhash", default=None, help="Recent blockhash (base58). Auto-fetched from gateway if omitted.")
 @click.option("--gateway-node", "-g", help="Gateway mesh node ID (e.g., !aabbccdd)")
@@ -164,12 +191,15 @@ def send(ctx):
 @click.option("--passphrase", prompt=True, hide_input=True, default="",
               help="Wallet passphrase")
 @click.pass_context
-def send_relay(ctx, wallet, recipient, amount, token, create_ata, blockhash,
-               gateway_node, auto_discover, passphrase):
+def send_relay(ctx, wallet, recipient, amount, token, usdc, fxn, create_ata,
+               blockhash, gateway_node, auto_discover, passphrase):
     """Mode 1: Sign locally and relay signed TX over mesh to gateway."""
     from solmesh.client import ClientNode
 
     config = ctx.obj["config"]
+    mint_address, decimals, symbol = _resolve_token(
+        token=token, usdc=usdc, fxn=fxn, network=config.solana.network,
+    )
     mesh = build_mesh(config)
     wm = WalletManager()
 
@@ -186,8 +216,7 @@ def send_relay(ctx, wallet, recipient, amount, token, create_ata, blockhash,
         click.echo(f"  Found gateway: {gw}")
 
     try:
-        if token:
-            mint_address, decimals, symbol = _resolve_token(token, config.solana.network)
+        if mint_address:
             click.echo(f"Signing token transaction locally...")
             click.echo(f"  From:   {wallet}")
             click.echo(f"  To:     {recipient}")
@@ -244,16 +273,22 @@ def send_relay(ctx, wallet, recipient, amount, token, create_ata, blockhash,
 @click.option("--to", "recipient", required=True, help="Recipient Solana address")
 @click.option("--amount", "-a", required=True, type=float, help="Amount (SOL or token units)")
 @click.option("--token", default=None, help="Token to send: 'USDC' or a mint address (default: SOL)")
+@click.option("--usdc", is_flag=True, help="Send USDC (auto-resolves mint address for current network)")
+@click.option("--fxn", is_flag=True, help="Send FXN (mainnet-beta only)")
 @click.option("--gateway-node", "-g", default=None, help="Gateway mesh node ID")
 @click.option("--auto-discover", is_flag=True, help="Auto-discover gateway via beacon")
 @click.option("--passphrase", prompt=True, hide_input=True, default="",
               help="Wallet passphrase")
 @click.pass_context
-def send_request(ctx, wallet, recipient, amount, token, gateway_node, auto_discover, passphrase):
+def send_request(ctx, wallet, recipient, amount, token, usdc, fxn,
+                 gateway_node, auto_discover, passphrase):
     """Mode 3: Request gateway to send from its hot wallet."""
     from solmesh.client import ClientNode
 
     config = ctx.obj["config"]
+    mint_address, decimals, symbol = _resolve_token(
+        token=token, usdc=usdc, fxn=fxn, network=config.solana.network,
+    )
     mesh = build_mesh(config)
     wm = WalletManager()
 
@@ -270,8 +305,7 @@ def send_request(ctx, wallet, recipient, amount, token, gateway_node, auto_disco
         click.echo(f"  Found gateway: {gw}")
 
     try:
-        if token:
-            mint_address, decimals, symbol = _resolve_token(token, config.solana.network)
+        if mint_address:
             click.echo(f"Requesting gateway token transfer...")
             click.echo(f"  To:     {recipient}")
             click.echo(f"  Amount: {amount} {symbol}")
@@ -317,17 +351,22 @@ def send_request(ctx, wallet, recipient, amount, token, gateway_node, auto_disco
 @click.option("--to", "recipient", required=True, help="Recipient Solana address")
 @click.option("--amount", "-a", required=True, type=float, help="Amount (SOL or token units)")
 @click.option("--token", default=None, help="Token: 'USDC' or mint address (default: SOL)")
+@click.option("--usdc", is_flag=True, help="Send USDC (auto-resolves mint address for current network)")
+@click.option("--fxn", is_flag=True, help="Send FXN (mainnet-beta only)")
 @click.option("--mode", "send_mode", type=click.Choice(["1", "3"]), default="3",
               help="Send mode: 1=sign+relay, 3=gateway request (default: 3)")
 @click.option("--passphrase", prompt=True, hide_input=True, default="",
               help="Wallet passphrase (validates ownership)")
 @click.pass_context
-def send_deferred(ctx, wallet, recipient, amount, token, send_mode, passphrase):
+def send_deferred(ctx, wallet, recipient, amount, token, usdc, fxn, send_mode, passphrase):
     """Queue a transaction intent for later sending (no mesh needed)."""
     from solmesh.client import ClientNode
     from solmesh.store import IntentStore
 
     config = ctx.obj["config"]
+    token_mint, token_decimals, symbol = _resolve_token(
+        token=token, usdc=usdc, fxn=fxn, network=config.solana.network,
+    )
     wm = WalletManager()
     store = IntentStore()
 
@@ -338,11 +377,6 @@ def send_deferred(ctx, wallet, recipient, amount, token, send_mode, passphrase):
     )
 
     int_mode = int(send_mode)
-    token_mint = None
-    token_decimals = 0
-    symbol = "SOL"
-    if token:
-        token_mint, token_decimals, symbol = _resolve_token(token, config.solana.network)
 
     try:
         intent = client.queue_intent(
@@ -404,14 +438,19 @@ def share_address(ctx, wallet, label):
 @cli.command("balance")
 @click.option("--address", "-a", required=True, help="Solana address to check")
 @click.option("--token", default=None, help="Token: 'USDC' or mint address (default: SOL)")
+@click.option("--usdc", is_flag=True, help="Check USDC balance (auto-resolves mint address)")
+@click.option("--fxn", is_flag=True, help="Check FXN balance (mainnet-beta only)")
 @click.option("--gateway-node", "-g", default=None, help="Gateway mesh node ID")
 @click.option("--auto-discover", is_flag=True, help="Auto-discover gateway via beacon")
 @click.pass_context
-def check_balance(ctx, address, token, gateway_node, auto_discover):
+def check_balance(ctx, address, token, usdc, fxn, gateway_node, auto_discover):
     """Query balance via gateway (SOL or token)."""
     from solmesh.client import ClientNode
 
     config = ctx.obj["config"]
+    mint_address, decimals, symbol = _resolve_token(
+        token=token, usdc=usdc, fxn=fxn, network=config.solana.network,
+    )
     mesh = build_mesh(config)
     wm = WalletManager()
 
@@ -428,8 +467,7 @@ def check_balance(ctx, address, token, gateway_node, auto_discover):
         click.echo(f"  Found gateway: {gw}")
 
     try:
-        if token:
-            mint_address, decimals, symbol = _resolve_token(token, config.solana.network)
+        if mint_address:
             client.check_token_balance(address, mint_address)
             click.echo(f"Token balance request sent ({symbol}). Waiting for response...")
 

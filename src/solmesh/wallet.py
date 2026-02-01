@@ -184,14 +184,13 @@ class WalletManager:
         with open(path) as f:
             data = json.load(f)
 
-        if data.get("encrypted"):
-            secret_bytes = _decrypt_secret(data["secret"], passphrase)
-        else:
-            # Legacy unencrypted wallet -- load it but warn
-            logger.warning(
-                "Wallet '%s' is unencrypted. Re-create it with a passphrase.", name
+        if not data.get("encrypted"):
+            raise ValueError(
+                f"Wallet '{name}' is not encrypted. "
+                "Re-create it with a passphrase using: "
+                "solmesh wallet create --name <name>"
             )
-            secret_bytes = bytes.fromhex(data["secret"])
+        secret_bytes = _decrypt_secret(data["secret"], passphrase)
 
         return Keypair.from_bytes(secret_bytes)
 
