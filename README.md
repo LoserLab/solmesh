@@ -2,7 +2,7 @@
 
 Send Solana transactions over Meshtastic/LoRa mesh networks.
 
-SolMesh enables cryptocurrency transfers in off-grid environments using LoRa radio. Supports native SOL and SPL tokens (USDC). Transactions are signed locally (private keys never leave your device), chunked to fit within LoRa's bandwidth constraints, and relayed through a gateway node to the Solana network.
+SolMesh enables cryptocurrency transfers in off-grid environments using LoRa radio. Supports native SOL and SPL tokens (USDC, FXN). Transactions are signed locally (private keys never leave your device), chunked to fit within LoRa's bandwidth constraints, and relayed through a gateway node to the Solana network.
 
 ## Operating Modes
 
