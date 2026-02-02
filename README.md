@@ -1,5 +1,7 @@
 # SolMesh
 
+> **This project is experimental.** It is published as open-source to share the concept and invite the community to build on it, improve it, and take it further. Contributions, forks, and new ideas are all welcome.
+
 Send Solana transactions over Meshtastic/LoRa mesh networks.
 
 SolMesh enables cryptocurrency transfers in off-grid environments using LoRa radio. Supports native SOL and SPL tokens (USDC, FXN). Transactions are signed locally (private keys never leave your device), chunked to fit within LoRa's bandwidth constraints, and relayed through a gateway node to the Solana network. Built in collaboration with [Mirra](https://x.com/mirra).
@@ -332,6 +334,10 @@ pytest
 ## Acknowledgments
 
 Built with [Mirra](https://x.com/mirra) and their team.
+
+## Contributing
+
+This is an experimental project and we encourage the community to build on it. Whether it's bug fixes, new features, protocol improvements, or entirely new directions -- contributions are welcome. Fork it, open a PR, or just take the ideas and run with them.
 
 ## License
 
