@@ -1,0 +1,74 @@
+# SolMesh
+
+> Send Solana transactions over Meshtastic/LoRa mesh networks. Enables cryptocurrency transfers in off-grid environments. Private keys never leave your device. Supports native SOL and SPL tokens (USDC, FXN). Built with Mirra.
+
+## Install
+
+```bash
+pip install -e .
+```
+
+## Operating Modes
+
+1. **Offline Sign + Relay**: Sign locally, relay signed tx over mesh to internet-connected gateway
+2. **Wallet-to-Wallet**: Exchange Solana addresses over LoRa with ACK confirmation
+3. **Full Gateway**: Gateway holds hot wallet, remote nodes send authenticated transfer requests (Ed25519)
+
+## Quick Start
+
+```bash
+solmesh wallet create --name mywallet
+solmesh gateway --rpc-url https://api.devnet.solana.com
+solmesh send relay --wallet mywallet --to <ADDRESS> --amount 0.5 --auto-discover
+solmesh send request --wallet mywallet --to <ADDRESS> --amount 0.1 --gateway-node '!aabbccdd'
+solmesh balance --address <ADDRESS> --auto-discover
+```
+
+## SPL Token Support
+
+```bash
+solmesh send relay --wallet mywallet --to <ADDRESS> --amount 5.0 --token USDC --auto-discover
+solmesh send request --wallet mywallet --to <ADDRESS> --amount 5.0 --token USDC --gateway-node '!aabbccdd'
+solmesh balance --address <ADDRESS> --token USDC --auto-discover
+```
+
+Use `--create-ata` if the recipient doesn't have a token account yet.
+
+## Store-and-Forward
+
+Queue transactions offline, auto-flush when a gateway comes into range:
+```bash
+solmesh send deferred --wallet mywallet --to <ADDRESS> --amount 0.1 --mode 3
+solmesh listen --wallet mywallet --auto-discover
+```
+
+## HTTP API
+
+REST API for programmatic access:
+```bash
+solmesh gateway --http-port 8080 --api-key "your-key" --rpc-url https://api.devnet.solana.com
+```
+
+Endpoints: /v1/status, /v1/balance/{address}, /v1/blockhash, /v1/slot, /v1/transfer
+
+## Protocol
+
+Compact binary protocol for LoRa's ~237-byte limit. 10-byte header, up to 210 bytes payload per chunk. Magic bytes: 0x53 0x4D ("SM"). Typical SOL transfer (~215 bytes) fits in 2 chunks. SPL payloads include flags byte and optional 32-byte mint address.
+
+## Security
+
+- Private keys never transmitted over LoRa
+- AES-256-GCM encrypted wallet files (PBKDF2, 480K iterations)
+- BIP39 mnemonic backup (24 words)
+- Mode 3: Ed25519 signature verification, pubkey allowlist, per-transfer limits
+- Token bucket rate limiting, CRC-8 integrity
+- Store-and-forward queue stores no secrets (wallet names and addresses only)
+
+## Related
+
+- [BaseMesh](https://github.com/LoserLab/basemesh): Same concept for Base/Ethereum L2
+- [Mirra](https://x.com/mirra): AI personal OS, integration partner
+
+## Author
+
+Created by Heathen. Built with Mirra.
